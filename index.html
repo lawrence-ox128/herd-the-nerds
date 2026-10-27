@@ -12,8 +12,8 @@
   <style>
     body { background-color: #0f172a; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
-    .custom-scrollbar::-webkit-scrollbar-track { background: #1e293b; }
-    .custom-scrollbar::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: #0b1120; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
   </style>
 </head>
 <body class="min-h-screen bg-slate-950 text-slate-100 selection:bg-amber-500 selection:text-slate-950">
@@ -30,7 +30,7 @@
     function App() {
       const [session, setSession] = useState(null);
       const [profile, setProfile] = useState(null);
-      const [needsOnboarding, setNeedsOnboarding] = useState(false);
+      const [showAuthModal, setShowAuthModal] = useState(false);
       const [clubNights, setClubNights] = useState([]);
       const [systems, setSystems] = useState([]);
       const [selectedNightId, setSelectedNightId] = useState(null);
@@ -38,31 +38,38 @@
       const [activeTab, setActiveTab] = useState('tables');
       const [loading, setLoading] = useState(true);
 
+      // Onboarding / Sign-in form state
+      const [authMethod, setAuthMethod] = useState('email'); // 'email' | 'discord'
+      const [inputEmail, setInputEmail] = useState('');
+      const [inputName, setInputName] = useState('');
+      const [inputDiscord, setInputDiscord] = useState('');
+      const [termsAccepted, setTermsAccepted] = useState(false);
+      const [emailAlertsOptIn, setEmailAlertsOptIn] = useState(true);
+      const [submittingAuth, setSubmittingAuth] = useState(false);
+
       // Modals
       const [isBookModalOpen, setIsBookModalOpen] = useState(false);
-      const [editingBooking, setEditingBooking] = useState(null);
 
-      // 1. Auth Listener
+      // 1. Session & Profile Synchronization
       useEffect(() => {
         supabase.auth.getSession().then(({ data: { session } }) => {
           setSession(session);
-          if (session?.user) checkProfile(session.user);
+          if (session?.user) syncProfile(session.user);
         });
 
         const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
           setSession(session);
-          if (session?.user) checkProfile(session.user);
+          if (session?.user) syncProfile(session.user);
           else {
             setProfile(null);
-            setNeedsOnboarding(false);
           }
         });
 
         return () => subscription.unsubscribe();
       }, []);
 
-      const checkProfile = async (user) => {
-        const { data, error } = await supabase
+      const syncProfile = async (user) => {
+        const { data } = await supabase
           .from('profiles')
           .select('*')
           .eq('id', user.id)
@@ -70,13 +77,15 @@
 
         if (data) {
           setProfile(data);
-          setNeedsOnboarding(false);
+          setShowAuthModal(false);
         } else {
-          setNeedsOnboarding(true);
+          // User authenticated via magic link or Discord but needs to save profile & GDPR acceptance
+          setInputEmail(user.email || '');
+          setShowAuthModal(true);
         }
       };
 
-      // 2. Fetch Initial Nights & Systems
+      // 2. Load Club Nights & Game Systems
       const fetchInitialData = async () => {
         setLoading(true);
         const [nightsRes, sysRes] = await Promise.all([
@@ -96,7 +105,7 @@
         fetchInitialData();
       }, []);
 
-      // 3. Fetch Bookings for Selected Night + Subscribe to Realtime
+      // 3. Fetch Bookings for Selected Night & Setup Realtime Sync
       const fetchBookings = async () => {
         if (!selectedNightId) return;
         const { data } = await supabase
@@ -116,7 +125,7 @@
         fetchBookings();
 
         const channel = supabase
-          .channel('realtime-tables')
+          .channel('realtime-tables-v2')
           .on('postgres_changes', { event: '*', schema: 'public', table: 'table_bookings' }, fetchBookings)
           .on('postgres_changes', { event: '*', schema: 'public', table: 'booking_players' }, fetchBookings)
           .subscribe();
@@ -137,39 +146,103 @@
         return null;
       };
 
-      // Actions
-      const handleLogin = async () => {
-        const email = prompt("Enter your email address for a secure Magic Login Link:");
-        if (!email) return;
-        const { error } = await supabase.auth.signInWithOtp({
-          email,
-          options: { emailRedirectTo: window.location.origin }
-        });
-        if (error) alert("Login error: " + error.message);
-        else alert("Magic sign-in link sent! Please check your inbox.");
-      };
+      // Handle Full Sign-Up / Onboarding Submission
+      const handleCompleteOnboarding = async (e) => {
+        e.preventDefault();
+        if (!termsAccepted) {
+          alert('You must accept the Terms & Conditions and Data Protection Policy to create an account.');
+          return;
+        }
 
-      const handleSaveProfile = async (displayName, discordHandle) => {
-        const { data, error } = await supabase.from('profiles').insert([{
+        setSubmittingAuth(true);
+
+        if (!session) {
+          // Store entered profile info in localStorage so it persists through email redirect
+          localStorage.setItem('pending_display_name', inputName);
+          localStorage.setItem('pending_discord_handle', inputDiscord);
+          localStorage.setItem('pending_email_alerts', String(emailAlertsOptIn));
+
+          const { error } = await supabase.auth.signInWithOtp({
+            email: inputEmail,
+            options: { emailRedirectTo: window.location.origin }
+          });
+
+          setSubmittingAuth(false);
+          if (error) {
+            alert('Authentication error: ' + error.message);
+          } else {
+            alert(`A secure login link has been sent to ${inputEmail}! Open the link in your email to confirm your account.`);
+            setShowAuthModal(false);
+          }
+          return;
+        }
+
+        // If session already exists, save profile to database
+        const { data, error } = await supabase.from('profiles').upsert([{
           id: session.user.id,
           club_id: CLUB_ID,
-          display_name: displayName,
-          discord_handle: discordHandle.startsWith('@') ? discordHandle : `@${discordHandle}`,
+          display_name: inputName,
+          discord_handle: inputDiscord.startsWith('@') ? inputDiscord : `@${inputDiscord}`,
+          email_notifications: emailAlertsOptIn,
           role: 'member',
           accepted_terms_at: new Date().toISOString()
         }]).select().single();
 
+        setSubmittingAuth(false);
         if (error) {
-          alert("Error creating profile: " + error.message);
+          alert('Error saving profile: ' + error.message);
         } else {
           setProfile(data);
-          setNeedsOnboarding(false);
+          setShowAuthModal(false);
         }
       };
 
+      // Discord OAuth Handshake
+      const handleDiscordSignIn = async () => {
+        if (!termsAccepted) {
+          alert('Please tick the Terms & Conditions checkbox before connecting with Discord.');
+          return;
+        }
+        const { error } = await supabase.auth.signInWithOAuth({
+          provider: 'discord',
+          options: { redirectTo: window.location.origin }
+        });
+        if (error) alert('Discord login error: ' + error.message);
+      };
+
+      // Check for stored pending profile after magic-link callback
+      useEffect(() => {
+        if (session?.user && !profile) {
+          const pendingName = localStorage.getItem('pending_display_name');
+          const pendingDiscord = localStorage.getItem('pending_discord_handle');
+          const pendingAlerts = localStorage.getItem('pending_email_alerts') === 'true';
+
+          if (pendingName) {
+            supabase.from('profiles').upsert([{
+              id: session.user.id,
+              club_id: CLUB_ID,
+              display_name: pendingName,
+              discord_handle: pendingDiscord ? (pendingDiscord.startsWith('@') ? pendingDiscord : `@${pendingDiscord}`) : '',
+              email_notifications: pendingAlerts,
+              role: 'member',
+              accepted_terms_at: new Date().toISOString()
+            }]).select().single().then(({ data }) => {
+              if (data) {
+                setProfile(data);
+                setShowAuthModal(false);
+                localStorage.removeItem('pending_display_name');
+                localStorage.removeItem('pending_discord_handle');
+                localStorage.removeItem('pending_email_alerts');
+              }
+            });
+          }
+        }
+      }, [session, profile]);
+
+      // Booking Action
       const handleCreateBooking = async ({ systemId, maxPlayers, notes, guestName }) => {
         if (!session || !profile) {
-          handleLogin();
+          setShowAuthModal(true);
           return;
         }
 
@@ -204,7 +277,7 @@
             booking_id: bookingData.id,
             player_id: profile.id,
             is_guest: false,
-            guest_name: profile.display_name,
+            guest_name: `${profile.display_name} (Host)`,
             invite_status: 'confirmed'
           }
         ];
@@ -226,7 +299,7 @@
 
       const handleJoinTable = async (bookingId) => {
         if (!session || !profile) {
-          handleLogin();
+          setShowAuthModal(true);
           return;
         }
 
@@ -300,7 +373,7 @@
                 )}
               </div>
 
-              {/* User Account Pill */}
+              {/* Account / Login CTA */}
               <div>
                 {session && profile ? (
                   <div className="flex items-center gap-3 bg-slate-950 border border-slate-800 px-3 py-1.5 rounded-xl text-xs">
@@ -318,7 +391,7 @@
                   </div>
                 ) : (
                   <button
-                    onClick={handleLogin}
+                    onClick={() => setShowAuthModal(true)}
                     className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-lg shadow-amber-500/20 transition"
                   >
                     Member Login / Sign Up
@@ -328,7 +401,7 @@
             </div>
           </header>
 
-          {/* MAIN */}
+          {/* MAIN VIEW */}
           <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-6">
             {activeTab === 'tables' && selectedNight && (
               <div className="space-y-6">
@@ -370,7 +443,7 @@
                   </div>
                   <button
                     onClick={() => {
-                      if (!session) handleLogin();
+                      if (!session || !profile) setShowAuthModal(true);
                       else setIsBookModalOpen(true);
                     }}
                     disabled={tablesRemaining === 0}
@@ -498,44 +571,172 @@
             )}
           </main>
 
-          {/* ONBOARDING & T&CS MODAL */}
-          {needsOnboarding && (
-            <div className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
-              <div className="bg-slate-900 border border-amber-500/40 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+          {/* ========================================================================= */}
+          {/* THE PROTOTYPE ONBOARDING & T&CS MODAL RESTORED FULLY                      */}
+          {/* ========================================================================= */}
+          {showAuthModal && (
+            <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-slate-700/80 rounded-2xl max-w-lg w-full p-6 sm:p-7 space-y-5 shadow-2xl relative">
+                <button
+                  onClick={() => setShowAuthModal(false)}
+                  className="absolute top-5 right-5 text-slate-400 hover:text-white text-lg font-bold"
+                >
+                  ✕
+                </button>
+
                 <div className="border-b border-slate-800 pb-3">
-                  <h3 className="text-lg font-bold text-white">Welcome to Herd the Nerds! 👋</h3>
-                  <p className="text-xs text-slate-400 mt-1">Please set up your club profile before booking or joining tables.</p>
+                  <h3 className="text-xl font-extrabold text-white flex items-center gap-2">
+                    <span>👋 Welcome to Herd the Nerds!</span>
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    First-Time Member Onboarding & Data Protection Agreement
+                  </p>
                 </div>
-                <form onSubmit={(e) => {
-                  e.preventDefault();
-                  const fd = new FormData(e.target);
-                  handleSaveProfile(fd.get('displayName'), fd.get('discordHandle'));
-                }} className="space-y-4 text-xs">
-                  <div>
-                    <label className="block text-slate-300 font-bold mb-1">Your Full Name / Nickname</label>
-                    <input required type="text" name="displayName" placeholder="e.g. Lawrence Oxborough" className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white focus:border-amber-500 focus:outline-none" />
+
+                <form onSubmit={handleCompleteOnboarding} className="space-y-4 text-xs">
+                  {/* Step 1: Sign-in Options */}
+                  {!session && (
+                    <div className="space-y-2">
+                      <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                        1. Choose Sign-In Method
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={handleDiscordSignIn}
+                          className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold transition"
+                        >
+                          <span>💬 Continue with Discord</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setAuthMethod('email')}
+                          className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl border transition font-semibold ${
+                            authMethod === 'email'
+                              ? 'bg-slate-800 border-amber-500 text-amber-400'
+                              : 'bg-slate-950/60 border-slate-800 text-slate-400'
+                          }`}
+                        >
+                          <span>✉️ Sign Up with Email</span>
+                        </button>
+                      </div>
+
+                      {authMethod === 'email' && (
+                        <div className="pt-2">
+                          <label className="block text-slate-300 font-medium mb-1">Email Address</label>
+                          <input
+                            required
+                            type="email"
+                            value={inputEmail}
+                            onChange={(e) => setInputEmail(e.target.value)}
+                            placeholder="you@example.com"
+                            className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white focus:border-amber-500 focus:outline-none"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Step 2: Display Profile Fields */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                        Display Name
+                      </label>
+                      <input
+                        required
+                        type="text"
+                        value={inputName}
+                        onChange={(e) => setInputName(e.target.value)}
+                        placeholder="e.g. Roboute Guilliman"
+                        className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white focus:border-amber-500 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                        Discord Handle
+                      </label>
+                      <input
+                        required
+                        type="text"
+                        value={inputDiscord}
+                        onChange={(e) => setInputDiscord(e.target.value)}
+                        placeholder="@username"
+                        className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white focus:border-amber-500 focus:outline-none"
+                      />
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-slate-300 font-bold mb-1">Discord Username (for opponent tagging)</label>
-                    <input required type="text" name="discordHandle" placeholder="e.g. @lawrence" className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white focus:border-amber-500 focus:outline-none" />
-                  </div>
-                  <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-2">
-                    <label className="flex items-start gap-2.5 cursor-pointer">
-                      <input required type="checkbox" className="mt-0.5 rounded border-slate-700 text-amber-500 focus:ring-0" />
+
+                  {/* Step 3: Terms of Use & UK GDPR Notice */}
+                  <div className="space-y-2">
+                    <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 max-h-36 overflow-y-auto custom-scrollbar text-[11px] text-slate-400 space-y-2">
+                      <div className="font-bold text-amber-400 uppercase tracking-wide">
+                        Herd the Nerds — Terms of Use & UK GDPR Data Protection Notice
+                      </div>
+                      <p>
+                        <strong>1. Data We Collect:</strong> To manage club night table allocations and game pairings, Herd the Nerds stores only your chosen Display Name, your login identifier (Email address or Discord Username/ID), and your club attendance count.
+                      </p>
+                      <p>
+                        <strong>2. How Your Data Is Used:</strong> Your Display Name and Discord handle (if applicable) are displayed on club table cards and the "Find a Buddy" notice board so other club members can arrange games with you. Your email address is strictly private and is never shared with third parties or visible to other members.
+                      </p>
+                      <p>
+                        <strong>3. Communications & Opt-Out:</strong> If you use Email login, you will only receive transactional magic links and critical table update alerts that you opt into below.
+                      </p>
+                      <p>
+                        <strong>4. Right of Deletion (GDPR):</strong> You may request the immediate deletion of your profile and data at any time via the club committee or self-service account removal.
+                      </p>
+                    </div>
+
+                    {/* Checkboxes */}
+                    <label className="flex items-start gap-2.5 cursor-pointer pt-1">
+                      <input
+                        type="checkbox"
+                        checked={termsAccepted}
+                        onChange={(e) => setTermsAccepted(e.target.checked)}
+                        className="mt-0.5 rounded border-slate-700 text-amber-500 focus:ring-0"
+                      />
                       <span className="text-slate-300 text-[11px] leading-relaxed">
-                        I agree to the <strong>Club Rules</strong> and consent to my display name and Discord handle being shown to club members under Herd the Nerds data protection guidelines.
+                        I agree to the Herd the Nerds <strong>Terms & Conditions</strong> and <strong>Data Protection Policy</strong> (Required to create a profile).
+                      </span>
+                    </label>
+
+                    <label className="flex items-start gap-2.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={emailAlertsOptIn}
+                        onChange={(e) => setEmailAlertsOptIn(e.target.checked)}
+                        className="mt-0.5 rounded border-slate-700 text-amber-500 focus:ring-0"
+                      />
+                      <span className="text-slate-400 text-[11px] leading-relaxed">
+                        Send me direct email alerts when I am challenged, my opponent drops out, or my booked club night date changes (You can mute this anytime).
                       </span>
                     </label>
                   </div>
-                  <button type="submit" className="w-full py-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm shadow-lg shadow-amber-500/20 transition">
-                    Complete Profile & Continue
-                  </button>
+
+                  {/* Actions */}
+                  <div className="flex items-center justify-end gap-3 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowAuthModal(false)}
+                      className="px-4 py-2.5 rounded-xl text-slate-400 hover:text-white font-medium transition"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={submittingAuth}
+                      className="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold shadow-lg shadow-emerald-500/20 transition flex items-center gap-1.5"
+                    >
+                      <span>✓</span>
+                      <span>{submittingAuth ? 'Processing...' : 'Agree & Create My Profile'}</span>
+                    </button>
+                  </div>
                 </form>
               </div>
             </div>
           )}
 
-          {/* BOOK MODAL */}
+          {/* BOOK TABLE MODAL */}
           {isBookModalOpen && (
             <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
               <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
