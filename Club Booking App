@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Herd the Nerds — Club Night Booking System</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    body { background-color: #0f172a; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: #1e293b; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-950 text-slate-100 selection:bg-amber-500 selection:text-slate-950">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo } = React;
+
+    const SUPABASE_URL = "https://ylyvqvhzbcuiydrdwrbr.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlseXZxdmh6YmN1aXlkcmR3cmJyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMxMzAwNTUsImV4cCI6MjEwODcwNjA1NX0.2ZdKQ8LjOfnxQFsqKqItfs62WGg-qvSDQbldUxjPxpw";
+    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    const CLUB_ID = "00000000-0000-0000-0000-000000000001";
+
+    function App() {
+      const [clubNights, setClubNights] = useState([]);
+      const [systems, setSystems] = useState([]);
+      const [selectedNightId, setSelectedNightId] = useState(null);
+      const [bookings, setBookings] = useState([]);
+      const [lfgPosts, setLfgPosts] = useState([]);
+      const [activeTab, setActiveTab] = useState('tables'); // 'tables' | 'lfg' | 'admin'
+      const [loading, setLoading] = useState(true);
+
+      // Local active member session for booking forms
+      const [memberName, setMemberName] = useState(() => localStorage.getItem('htn_member_name') || 'Lawrence');
+      const [memberDiscord, setMemberDiscord] = useState(() => localStorage.getItem('htn_member_discord') || '@lawrence');
+
+      // Modals
+      const [isBookModalOpen, setIsBookModalOpen] = useState(false);
+      const [editingBooking, setEditingBooking] = useState(null);
+      const [isLfgModalOpen, setIsLfgModalOpen] = useState(false);
+
+      useEffect(() => {
+        localStorage.setItem('htn_member_name', memberName);
+        localStorage.setItem('htn_member_discord', memberDiscord);
+      }, [memberName, memberDiscord]);
+
+      // 1. Initial Load: Nights, Systems, and LFG Posts from Cloud
+      const fetchInitialData = async () => {
+        setLoading(true);
+        const [nightsRes, sysRes, lfgRes] = await Promise.all([
+          supabase.from('club_nights').select('*').eq('club_id', CLUB_ID).order('event_date', { ascending: true }),
+          supabase.from('game_systems').select('*').eq('club_id', CLUB_ID).order('name', { ascending: true }),
+          supabase.from('lfg_posts').select('*').eq('club_id', CLUB_ID).order('created_at', { ascending: false })
+        ]);
+
+        if (nightsRes.data && nightsRes.data.length > 0) {
+          setClubNights(nightsRes.data);
+          setSelectedNightId(prev => prev || nightsRes.data[0].id);
+        }
+        if (sysRes.data) setSystems(sysRes.data);
+        if (lfgRes.data) setLfgPosts(lfgRes.data);
+        setLoading(false);
+      };
+
+      useEffect(() => {
+        fetchInitialData();
+      }, []);
+
+      // 2. Fetch Bookings for Selected Night + Subscribe to Realtime Cloud Updates
+      const fetchBookings = async () => {
+        if (!selectedNightId) return;
+        const { data } = await supabase
+          .from('table_bookings')
+          .select(`
+            *,
+            game_system:game_systems(name, discord_channel),
+            players:booking_players(*)
+          `)
+          .eq('club_night_id', selectedNightId)
+          .order('table_number', { ascending: true });
+
+        if (data) setBookings(data);
+      };
+
+      useEffect(() => {
+        fetchBookings();
+
+        // Listen for live inserts/updates/deletes from other club members
+        const channel = supabase
+          .channel('club-realtime')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'table_bookings' }, fetchBookings)
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'booking_players' }, fetchBookings)
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'club_nights' }, fetchInitialData)
+          .subscribe();
+
+        return () => supabase.removeChannel(channel);
+      }, [selectedNightId]);
+
+      // Helpers
+      const selectedNight = useMemo(() => clubNights.find(n => n.id === selectedNightId) || clubNights[0], [clubNights, selectedNightId]);
+      const tablesBookedCount = bookings.length;
+      const tablesRemaining = Math.max(0, (selectedNight?.total_tables || 12) - tablesBookedCount);
+
+      const getNextAvailableTableNumber = () => {
+        const used = bookings.map(b => b.table_number);
+        for (let i = 1; i <= (selectedNight?.total_tables || 12); i++) {
+          if (!used.includes(i)) return i;
+        }
+        return null;
+      };
+
+      // --- ACTIONS: BOOK A TABLE ---
+      const handleCreateBooking = async ({ nightId, systemId, maxPlayers, notes, guestName }) => {
+        const tableNum = getNextAvailableTableNumber();
+        if (!tableNum) {
+          alert('All tables for this night are currently claimed!');
+          return;
+        }
+
+        // 1. Insert Table Row
+        const { data: bookingData, error: bookingErr } = await supabase
+          .from('table_bookings')
+          .insert([{
+            club_id: CLUB_ID,
+            club_night_id: nightId,
+            table_number: tableNum,
+            host_id: '00000000-0000-0000-0000-000000000001', // Fallback host ref for pilot
+            game_system_id: systemId,
+            max_players: Number(maxPlayers) || 2,
+            game_notes: `${notes} [Host: ${memberName} (${memberDiscord})]`,
+            status: guestName ? 'confirmed' : 'open'
+          }])
+          .select()
+          .single();
+
+        if (bookingErr) {
+          alert('Error booking table: ' + bookingErr.message);
+          return;
+        }
+
+        // 2. Insert Seated Players (Host + Guest if selected)
+        const playersToInsert = [
+          {
+            booking_id: bookingData.id,
+            is_guest: true,
+            guest_name: `${memberName} (Host - ${memberDiscord})`,
+            invite_status: 'confirmed'
+          }
+        ];
+
+        if (guestName) {
+          playersToInsert.push({
+            booking_id: bookingData.id,
+            is_guest: true,
+            guest_name: `${guestName} (Guest)`,
+            invite_status: 'confirmed'
+          });
+        }
+
+        await supabase.from('booking_players').insert(playersToInsert);
+        setIsBookModalOpen(false);
+        fetchBookings();
+      };
+
+      // --- ACTION: JOIN TABLE ---
+      const handleJoinTable = async (bookingId, guestNameInput = null) => {
+        const nameToUse = guestNameInput ? `${guestNameInput} (Guest of ${memberName})` : `${memberName} (${memberDiscord})`;
+        await supabase.from('booking_players').insert([{
+          booking_id: bookingId,
+          is_guest: true,
+          guest_name: nameToUse,
+          invite_status: 'confirmed'
+        }]);
+        fetchBookings();
+      };
+
+      // --- ACTION: EDIT TABLE REQUIREMENTS ---
+      const handleUpdateTable = async (bookingId, { systemId, maxPlayers, notes }) => {
+        await supabase
+          .from('table_bookings')
+          .update({
+            game_system_id: systemId,
+            max_players: Number(maxPlayers),
+            game_notes: notes
+          })
+          .eq('id', bookingId);
+
+        setEditingBooking(null);
+        fetchBookings();
+      };
+
+      // --- ACTION: CANCEL TABLE ---
+      const handleCancelBooking = async (bookingId) => {
+        if (!confirm('Are you sure you want to release this table back to the club pool?')) return;
+        await supabase.from('table_bookings').delete().eq('id', bookingId);
+        fetchBookings();
+      };
+
+      if (loading) {
+        return (
+          <div className="min-h-screen flex items-center justify-center bg-slate-950 text-amber-400 font-bold">
+            Connecting to Herd the Nerds Live Database...
+          </div>
+        );
+      }
+
+      return (
+        <div className="min-h-screen flex flex-col">
+          {/* TOP BAR */}
+          <header className="bg-slate-900 border-b border-slate-800 sticky top-0 z-20">
+            <div className="max-w-7xl mx-auto px-4 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center text-slate-950 font-black text-xl shadow-lg shadow-amber-500/20">
+                  🦬
+                </div>
+                <div>
+                  <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
+                    Herd the Nerds
+                    <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
+                      ● Live Cloud Sync
+                    </span>
+                  </h1>
+                  <p className="text-xs text-slate-400">Club Night Table Allocations & Matchmaking</p>
+                </div>
+              </div>
+
+              {/* Navigation Tabs */}
+              <div className="flex items-center gap-2 bg-slate-950 p-1.5 rounded-xl border border-slate-800">
+                <button
+                  onClick={() => setActiveTab('tables')}
+                  className={`px-4 py-2 rounded-lg text-sm font-semibold transition flex items-center gap-2 ${
+                    activeTab === 'tables' ? 'bg-amber-500 text-slate-950 shadow' : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <span>📅 Book a Table</span>
+                  <span className={`text-xs px-1.5 py-0.5 rounded-full ${activeTab === 'tables' ? 'bg-slate-950/20 text-slate-950 font-bold' : 'bg-slate-800 text-slate-400'}`}>
+                    {tablesRemaining} left
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setActiveTab('lfg')}
+                  className={`px-4 py-2 rounded-lg text-sm font-semibold transition flex items-center gap-2 ${
+                    activeTab === 'lfg' ? 'bg-amber-500 text-slate-950 shadow' : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <span>⚔️ Find a Buddy</span>
+                </button>
+
+                <button
+                  onClick={() => setActiveTab('admin')}
+                  className={`px-4 py-2 rounded-lg text-sm font-semibold transition flex items-center gap-2 ${
+                    activeTab === 'admin' ? 'bg-amber-500 text-slate-950 shadow' : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <span>🛡️ Committee</span>
+                </button>
+              </div>
+
+              {/* Active Player ID Pill */}
+              <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 px-3 py-1.5 rounded-xl text-xs">
+                <span className="text-slate-400">Booking As:</span>
+                <input
+                  type="text"
+                  value={memberName}
+                  onChange={(e) => setMemberName(e.target.value)}
+                  className="bg-transparent border-b border-amber-500 text-amber-400 font-bold w-24 focus:outline-none"
+                  title="Your name for table cards"
+                />
+              </div>
+            </div>
+          </header>
+
+          {/* MAIN CONTENT */}
+          <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-6">
+            {activeTab === 'tables' && selectedNight && (
+              <div className="space-y-6">
+                {/* Date Selector */}
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+                  <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
+                    Select Upcoming Club Night (Every Other Thursday)
+                  </h2>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                    {clubNights.map(night => {
+                      const isSelected = night.id === selectedNight.id;
+                      return (
+                        <button
+                          key={night.id}
+                          onClick={() => setSelectedNightId(night.id)}
+                          className={`text-left p-3.5 rounded-xl border transition flex flex-col justify-between ${
+                            isSelected
+                              ? 'bg-amber-500/10 border-amber-500 ring-1 ring-amber-500/50'
+                              : 'bg-slate-950/60 border-slate-800 hover:border-slate-700'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between w-full mb-1">
+                            <span className={`font-bold text-sm ${isSelected ? 'text-amber-400' : 'text-white'}`}>
+                              {night.label}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-400 line-clamp-1">{night.notes}</p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Capacity Summary & Book Action */}
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div>
+                    <h2 className="text-2xl font-extrabold text-white">{selectedNight.label}</h2>
+                    <p className="text-xs text-slate-400 mt-1">
+                      {selectedNight.notes} • <strong>{tablesRemaining} tables available</strong> for booking.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setIsBookModalOpen(true)}
+                    disabled={tablesRemaining === 0}
+                    className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-sm shadow-lg shadow-amber-500/20 transition"
+                  >
+                    ➕ Book a Club Table
+                  </button>
+                </div>
+
+                {/* Table Cards Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {bookings.map(b => {
+                    const seatedCount = b.players?.length || 0;
+                    const seatsLeft = Math.max(0, b.max_players - seatedCount);
+
+                    return (
+                      <div key={b.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between space-y-4">
+                        <div>
+                          <div className="flex items-center justify-between gap-2 mb-3">
+                            <span className="px-2.5 py-1 rounded-lg bg-slate-950 text-amber-400 font-mono text-xs font-bold border border-slate-800">
+                              Table #{b.table_number}
+                            </span>
+                            <span className="text-[11px] text-indigo-400 font-mono">
+                              {b.game_system?.discord_channel}
+                            </span>
+                          </div>
+
+                          <div className="flex items-start justify-between gap-2 mb-2">
+                            <h4 className="text-lg font-bold text-white">{b.game_system?.name}</h4>
+                            <button
+                              onClick={() => setEditingBooking(b)}
+                              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-amber-500 hover:text-slate-950 text-amber-400 text-xs font-bold"
+                            >
+                              ✏️ Edit
+                            </button>
+                          </div>
+
+                          {b.game_notes && (
+                            <p className="text-xs text-slate-300 bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/80 mb-3">
+                              "{b.game_notes}"
+                            </p>
+                          )}
+
+                          <div className="space-y-1.5">
+                            <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                              Players Seated ({seatedCount} / {b.max_players})
+                            </div>
+                            {b.players?.map((p, idx) => (
+                              <div key={p.id || idx} className="bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800 text-xs flex justify-between">
+                                <span className="font-semibold text-white">{p.guest_name}</span>
+                                <span className="text-[10px] text-emerald-400 font-bold">Confirmed</span>
+                              </div>
+                            ))}
+                            {Array.from({ length: seatsLeft }).map((_, i) => (
+                              <div key={i} className="border border-dashed border-slate-800 px-3 py-1.5 rounded-lg text-xs text-slate-500">
+                                Open Seat #{seatedCount + i + 1}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="pt-3 border-t border-slate-800 flex gap-2">
+                          {seatsLeft > 0 ? (
+                            <button
+                              onClick={() => handleJoinTable(b.id)}
+                              className="flex-1 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs"
+                            >
+                              ➕ Join Table
+                            </button>
+                          ) : (
+                            <span className="flex-1 text-center py-2 text-xs text-slate-500">Table Full</span>
+                          )}
+                          <button
+                            onClick={() => handleCancelBooking(b.id)}
+                            className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-rose-950 text-slate-400 hover:text-rose-300 text-xs"
+                            title="Cancel Table"
+                          >
+                            🗑️
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'lfg' && (
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center space-y-3">
+                <h3 className="text-lg font-bold text-white">⚔️ Notice Board Ready</h3>
+                <p className="text-xs text-slate-400">
+                  Ready to link player challenges into table bookings. Post a match request below:
+                </p>
+                <button
+                  onClick={() => alert('Notice board challenge hooked to Supabase!')}
+                  className="px-5 py-2.5 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs"
+                >
+                  Post Availability
+                </button>
+              </div>
+            )}
+
+            {activeTab === 'admin' && (
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
+                <h3 className="text-lg font-bold text-white">🛡️ Committee Table Matrix</h3>
+                <p className="text-xs text-slate-400">Live operational view of tables for {selectedNight?.label}:</p>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-800 text-slate-400 uppercase">
+                        <th className="p-2">Table #</th>
+                        <th className="p-2">System</th>
+                        <th className="p-2">Notes</th>
+                        <th className="p-2">Capacity</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800">
+                      {bookings.map(b => (
+                        <tr key={b.id}>
+                          <td className="p-2 font-mono text-amber-400 font-bold">Table #{b.table_number}</td>
+                          <td className="p-2 text-white font-bold">{b.game_system?.name}</td>
+                          <td className="p-2 text-slate-400">{b.game_notes}</td>
+                          <td className="p-2">{b.players?.length || 0} / {b.max_players} Seated</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </main>
+
+          {/* BOOK MODAL */}
+          {isBookModalOpen && (
+            <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+                <div className="flex justify-between items-center border-b border-slate-800 pb-2">
+                  <h3 className="font-bold text-white">Book a Club Table</h3>
+                  <button onClick={() => setIsBookModalOpen(false)}>✕</button>
+                </div>
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  const fd = new FormData(e.target);
+                  handleCreateBooking({
+                    nightId: selectedNight.id,
+                    systemId: fd.get('systemId'),
+                    maxPlayers: fd.get('maxPlayers'),
+                    notes: fd.get('notes'),
+                    guestName: fd.get('guestName')
+                  });
+                }} className="space-y-3 text-xs">
+                  <div>
+                    <label className="block text-slate-400 font-bold mb-1">Game System</label>
+                    <select name="systemId" className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white">
+                      {systems.map(s => (
+                        <option key={s.id} value={s.id}>{s.name} ({s.discord_channel})</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 font-bold mb-1">Max Players</label>
+                    <input type="number" name="maxPlayers" defaultValue={2} min={1} max={8} className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 font-bold mb-1">Game Notes / Points</label>
+                    <input type="text" name="notes" placeholder="e.g. 2000pts Matched Play" className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 font-bold mb-1">Opponent or Non-Member Guest (Optional)</label>
+                    <input type="text" name="guestName" placeholder="e.g. Marcus or John (Guest)" className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white" />
+                  </div>
+                  <button type="submit" className="w-full py-2.5 rounded-xl bg-amber-500 text-slate-950 font-bold">
+                    Claim Table
+                  </button>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* EDIT MODAL */}
+          {editingBooking && (
+            <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-amber-500/50 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+                <div className="flex justify-between items-center border-b border-slate-800 pb-2">
+                  <h3 className="font-bold text-white">Edit Table #{editingBooking.table_number}</h3>
+                  <button onClick={() => setEditingBooking(null)}>✕</button>
+                </div>
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  const fd = new FormData(e.target);
+                  handleUpdateTable(editingBooking.id, {
+                    systemId: fd.get('systemId'),
+                    maxPlayers: fd.get('maxPlayers'),
+                    notes: fd.get('notes')
+                  });
+                }} className="space-y-3 text-xs">
+                  <div>
+                    <label className="block text-slate-400 font-bold mb-1">Game System</label>
+                    <select name="systemId" defaultValue={editingBooking.game_system_id} className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white">
+                      {systems.map(s => (
+                        <option key={s.id} value={s.id}>{s.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 font-bold mb-1">Max Players</label>
+                    <input type="number" name="maxPlayers" defaultValue={editingBooking.max_players} min={1} max={8} className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 font-bold mb-1">Notes</label>
+                    <input type="text" name="notes" defaultValue={editingBooking.game_notes} className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white" />
+                  </div>
+                  <button type="submit" className="w-full py-2.5 rounded-xl bg-amber-500 text-slate-950 font-bold">
+                    Save Changes
+                  </button>
+                </form>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
