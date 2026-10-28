@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Herd the Nerds — Club Night Booking System</title>
+  <title>Herd the Nerds — Club Night & Table Allocations</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -12,8 +12,8 @@
   <style>
     body { background-color: #0f172a; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
-    .custom-scrollbar::-webkit-scrollbar-track { background: #0b1120; }
-    .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: #1e293b; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
   </style>
 </head>
 <body class="min-h-screen bg-slate-950 text-slate-100 selection:bg-amber-500 selection:text-slate-950">
@@ -28,47 +28,75 @@
     const CLUB_ID = "00000000-0000-0000-0000-000000000001";
 
     function App() {
+      // --- AUTH & USER PROFILE ---
       const [session, setSession] = useState(null);
-      const [profile, setProfile] = useState(null);
-      const [showAuthModal, setShowAuthModal] = useState(false);
+      const [currentUser, setCurrentUser] = useState(null);
+      const [users, setUsers] = useState([]);
+
+      // --- DATA COLLECTIONS ---
       const [clubNights, setClubNights] = useState([]);
       const [systems, setSystems] = useState([]);
       const [selectedNightId, setSelectedNightId] = useState(null);
       const [bookings, setBookings] = useState([]);
-      const [activeTab, setActiveTab] = useState('tables');
+      const [lfgPosts, setLfgPosts] = useState([]);
+
+      // --- NAVIGATION & UI STATE ---
+      const [activeTab, setActiveTab] = useState('tables'); // 'tables' | 'lfg' | 'admin'
       const [loading, setLoading] = useState(true);
 
-      // Onboarding / Sign-in form state
-      const [authMethod, setAuthMethod] = useState('email'); // 'email' | 'discord'
-      const [inputEmail, setInputEmail] = useState('');
-      const [inputName, setInputName] = useState('');
-      const [inputDiscord, setInputDiscord] = useState('');
-      const [termsAccepted, setTermsAccepted] = useState(false);
-      const [emailAlertsOptIn, setEmailAlertsOptIn] = useState(true);
-      const [submittingAuth, setSubmittingAuth] = useState(false);
+      // --- NOTIFICATION FEED ---
+      const [notificationFeed, setNotificationFeed] = useState([
+        {
+          id: 'n-init',
+          time: '20:00',
+          type: 'discord',
+          target: '#arrange-a-game-40k',
+          text: '🟢 Realtime Sync Online. Welcome to Herd the Nerds!'
+        }
+      ]);
 
-      // Modals
+      // --- MODALS STATE ---
       const [isBookModalOpen, setIsBookModalOpen] = useState(false);
+      const [editingBooking, setEditingBooking] = useState(null);
+      const [isLfgModalOpen, setIsLfgModalOpen] = useState(false);
+      const [challengeTargetPost, setChallengeTargetPost] = useState(null);
+      const [cancelModalBooking, setCancelModalBooking] = useState(null);
+      const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+      const [showAuthModal, setShowAuthModal] = useState(false);
+      const [termsPreviewOpen, setTermsPreviewOpen] = useState(false);
 
-      // 1. Session & Profile Synchronization
+      // --- LFG FILTERS ---
+      const [lfgFilterNight, setLfgFilterNight] = useState('ALL');
+      const [lfgFilterSystem, setLfgFilterSystem] = useState('ALL');
+
+      // Helper: Dispatch local notification pill
+      const pushNotification = (type, target, text) => {
+        const timeStr = new Date().toTimeString().slice(0, 5);
+        setNotificationFeed(prev => [
+          { id: 'n-' + Date.now(), time: timeStr, type, target, text },
+          ...prev.slice(0, 4)
+        ]);
+      };
+
+      // 1. Supabase Auth Listener
       useEffect(() => {
         supabase.auth.getSession().then(({ data: { session } }) => {
           setSession(session);
-          if (session?.user) syncProfile(session.user);
+          if (session?.user) syncCurrentProfile(session.user);
         });
 
         const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
           setSession(session);
-          if (session?.user) syncProfile(session.user);
+          if (session?.user) syncCurrentProfile(session.user);
           else {
-            setProfile(null);
+            setCurrentUser(null);
           }
         });
 
         return () => subscription.unsubscribe();
       }, []);
 
-      const syncProfile = async (user) => {
+      const syncCurrentProfile = async (user) => {
         const { data } = await supabase
           .from('profiles')
           .select('*')
@@ -76,21 +104,21 @@
           .maybeSingle();
 
         if (data) {
-          setProfile(data);
+          setCurrentUser(data);
           setShowAuthModal(false);
         } else {
-          // User authenticated via magic link or Discord but needs to save profile & GDPR acceptance
-          setInputEmail(user.email || '');
           setShowAuthModal(true);
         }
       };
 
-      // 2. Load Club Nights & Game Systems
+      // 2. Load Core Data (Nights, Systems, Users, LFG Posts)
       const fetchInitialData = async () => {
         setLoading(true);
-        const [nightsRes, sysRes] = await Promise.all([
+        const [nightsRes, sysRes, usersRes, lfgRes] = await Promise.all([
           supabase.from('club_nights').select('*').eq('club_id', CLUB_ID).order('event_date', { ascending: true }),
-          supabase.from('game_systems').select('*').eq('club_id', CLUB_ID).order('name', { ascending: true })
+          supabase.from('game_systems').select('*').eq('club_id', CLUB_ID).order('name', { ascending: true }),
+          supabase.from('profiles').select('*').order('display_name', { ascending: true }),
+          supabase.from('lfg_posts').select('*').order('created_at', { ascending: false })
         ]);
 
         if (nightsRes.data && nightsRes.data.length > 0) {
@@ -98,6 +126,8 @@
           setSelectedNightId(prev => prev || nightsRes.data[0].id);
         }
         if (sysRes.data) setSystems(sysRes.data);
+        if (usersRes.data) setUsers(usersRes.data);
+        if (lfgRes.data) setLfgPosts(lfgRes.data);
         setLoading(false);
       };
 
@@ -105,7 +135,7 @@
         fetchInitialData();
       }, []);
 
-      // 3. Fetch Bookings for Selected Night & Setup Realtime Sync
+      // 3. Load Bookings for Selected Night & Subscribe to Realtime
       const fetchBookings = async () => {
         if (!selectedNightId) return;
         const { data } = await supabase
@@ -125,144 +155,115 @@
         fetchBookings();
 
         const channel = supabase
-          .channel('realtime-tables-v2')
+          .channel('club-v2-full-realtime')
           .on('postgres_changes', { event: '*', schema: 'public', table: 'table_bookings' }, fetchBookings)
           .on('postgres_changes', { event: '*', schema: 'public', table: 'booking_players' }, fetchBookings)
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'lfg_posts' }, async () => {
+            const { data } = await supabase.from('lfg_posts').select('*').order('created_at', { ascending: false });
+            if (data) setLfgPosts(data);
+          })
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, async () => {
+            const { data } = await supabase.from('profiles').select('*').order('display_name', { ascending: true });
+            if (data) setUsers(data);
+          })
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'club_nights' }, async () => {
+            const { data } = await supabase.from('club_nights').select('*').order('event_date', { ascending: true });
+            if (data) setClubNights(data);
+          })
           .subscribe();
 
         return () => supabase.removeChannel(channel);
       }, [selectedNightId]);
 
       // Helpers
-      const selectedNight = useMemo(() => clubNights.find(n => n.id === selectedNightId) || clubNights[0], [clubNights, selectedNightId]);
-      const tablesRemaining = Math.max(0, (selectedNight?.total_tables || 12) - bookings.length);
-      const isAdmin = profile?.role === 'committee_admin' || profile?.role === 'super_admin';
+      const activeClubNights = useMemo(() => clubNights.filter(n => n.status !== 'cancelled'), [clubNights]);
+      const selectedNight = useMemo(() => activeClubNights.find(n => n.id === selectedNightId) || activeClubNights[0] || clubNights[0], [activeClubNights, clubNights, selectedNightId]);
+      const isAdmin = currentUser?.role === 'committee_admin' || currentUser?.role === 'super_admin';
 
-      const getNextAvailableTableNumber = () => {
-        const used = bookings.map(b => b.table_number);
-        for (let i = 1; i <= (selectedNight?.total_tables || 12); i++) {
+      const getUser = (id) => users.find(u => u.id === id) || { display_name: 'Former Member', discord_handle: null, attendance: 0 };
+      const getSystemChannel = (sysName) => {
+        const found = systems.find(s => s.name === sysName);
+        return found ? found.discord_channel : '#general-games';
+      };
+
+      const getBookingsForNight = (nightId) => bookings.filter(b => b.club_night_id === nightId && b.status !== 'cancelled');
+      const currentNightBookings = selectedNight ? bookings.filter(b => b.club_night_id === selectedNight.id && b.status !== 'cancelled') : [];
+      const tablesBookedCount = currentNightBookings.length;
+      const tablesRemaining = Math.max(0, (selectedNight?.total_tables || 12) - tablesBookedCount);
+      const totalPlayersBookedTonight = currentNightBookings.reduce((acc, b) => acc + (b.players?.length || 0), 0);
+
+      const getNextAvailableTableNumber = (nightId) => {
+        const used = bookings.filter(b => b.club_night_id === nightId && b.status !== 'cancelled').map(b => b.table_number);
+        const night = clubNights.find(n => n.id === nightId);
+        for (let i = 1; i <= (night ? night.total_tables : 12); i++) {
           if (!used.includes(i)) return i;
         }
         return null;
       };
 
-      // Handle Full Sign-Up / Onboarding Submission
-      const handleCompleteOnboarding = async (e) => {
-        e.preventDefault();
-        if (!termsAccepted) {
-          alert('You must accept the Terms & Conditions and Data Protection Policy to create an account.');
-          return;
-        }
+      // Incoming Challenges
+      const myIncomingChallenges = useMemo(() => {
+        if (!currentUser) return [];
+        return bookings.filter(b =>
+          b.status === 'pending_challenge' &&
+          b.players?.some(p => p.player_id === currentUser.id && p.invite_status === 'invited_challenged')
+        );
+      }, [bookings, currentUser]);
 
-        setSubmittingAuth(true);
-
-        if (!session) {
-          // Store entered profile info in localStorage so it persists through email redirect
-          localStorage.setItem('pending_display_name', inputName);
-          localStorage.setItem('pending_discord_handle', inputDiscord);
-          localStorage.setItem('pending_email_alerts', String(emailAlertsOptIn));
-
-          const { error } = await supabase.auth.signInWithOtp({
-            email: inputEmail,
-            options: { emailRedirectTo: window.location.origin }
-          });
-
-          setSubmittingAuth(false);
-          if (error) {
-            alert('Authentication error: ' + error.message);
-          } else {
-            alert(`A secure login link has been sent to ${inputEmail}! Open the link in your email to confirm your account.`);
-            setShowAuthModal(false);
-          }
-          return;
-        }
-
-        // If session already exists, save profile to database
-        const { data, error } = await supabase.from('profiles').upsert([{
-          id: session.user.id,
-          club_id: CLUB_ID,
-          display_name: inputName,
-          discord_handle: inputDiscord.startsWith('@') ? inputDiscord : `@${inputDiscord}`,
-          email_notifications: emailAlertsOptIn,
-          role: 'member',
-          accepted_terms_at: new Date().toISOString()
-        }]).select().single();
-
-        setSubmittingAuth(false);
-        if (error) {
-          alert('Error saving profile: ' + error.message);
-        } else {
-          setProfile(data);
-          setShowAuthModal(false);
-        }
-      };
-
-      // Discord OAuth Handshake
-      const handleDiscordSignIn = async () => {
-        if (!termsAccepted) {
-          alert('Please tick the Terms & Conditions checkbox before connecting with Discord.');
-          return;
-        }
-        const { error } = await supabase.auth.signInWithOAuth({
-          provider: 'discord',
-          options: { redirectTo: window.location.origin }
-        });
-        if (error) alert('Discord login error: ' + error.message);
-      };
-
-      // Check for stored pending profile after magic-link callback
-      useEffect(() => {
-        if (session?.user && !profile) {
-          const pendingName = localStorage.getItem('pending_display_name');
-          const pendingDiscord = localStorage.getItem('pending_discord_handle');
-          const pendingAlerts = localStorage.getItem('pending_email_alerts') === 'true';
-
-          if (pendingName) {
-            supabase.from('profiles').upsert([{
-              id: session.user.id,
-              club_id: CLUB_ID,
-              display_name: pendingName,
-              discord_handle: pendingDiscord ? (pendingDiscord.startsWith('@') ? pendingDiscord : `@${pendingDiscord}`) : '',
-              email_notifications: pendingAlerts,
-              role: 'member',
-              accepted_terms_at: new Date().toISOString()
-            }]).select().single().then(({ data }) => {
-              if (data) {
-                setProfile(data);
-                setShowAuthModal(false);
-                localStorage.removeItem('pending_display_name');
-                localStorage.removeItem('pending_discord_handle');
-                localStorage.removeItem('pending_email_alerts');
-              }
-            });
-          }
-        }
-      }, [session, profile]);
-
-      // Booking Action
-      const handleCreateBooking = async ({ systemId, maxPlayers, notes, guestName }) => {
-        if (!session || !profile) {
+      // --- ACTIONS: TABLE BOOKINGS ---
+      const handleCreateTableBooking = async (formData) => {
+        if (!currentUser) {
           setShowAuthModal(true);
           return;
         }
 
-        const tableNum = getNextAvailableTableNumber();
-        if (!tableNum) {
+        const nextTableNum = getNextAvailableTableNumber(formData.nightId);
+        if (!nextTableNum) {
           alert('All tables for this night are currently claimed!');
           return;
+        }
+
+        let tableStatus = 'open';
+        const playersToInsert = [
+          {
+            player_id: currentUser.id,
+            is_guest: false,
+            guest_name: currentUser.display_name,
+            invite_status: 'confirmed'
+          }
+        ];
+
+        if (formData.joinType === 'already_matched' && formData.opponentId) {
+          const oppUser = getUser(formData.opponentId);
+          playersToInsert.push({
+            player_id: formData.opponentId,
+            is_guest: false,
+            guest_name: oppUser.display_name,
+            invite_status: 'confirmed'
+          });
+          if (playersToInsert.length >= Number(formData.maxPlayers)) tableStatus = 'confirmed';
+        } else if (formData.joinType === 'bring_guest' && formData.guestName.trim()) {
+          playersToInsert.push({
+            player_id: null,
+            is_guest: true,
+            guest_name: `${formData.guestName.trim()} (Guest of ${currentUser.display_name.split(' ')[0]})`,
+            brought_by: currentUser.id,
+            invite_status: 'confirmed'
+          });
+          if (playersToInsert.length >= Number(formData.maxPlayers)) tableStatus = 'confirmed';
         }
 
         const { data: bookingData, error: bookingErr } = await supabase
           .from('table_bookings')
           .insert([{
             club_id: CLUB_ID,
-            club_night_id: selectedNight.id,
-            table_number: tableNum,
-            host_id: profile.id,
-            game_system_id: systemId,
-            max_players: Number(maxPlayers) || 2,
-            game_notes: notes,
-            status: guestName ? 'confirmed' : 'open'
+            club_night_id: formData.nightId,
+            table_number: nextTableNum,
+            host_id: currentUser.id,
+            game_system_id: formData.systemId,
+            max_players: Number(formData.maxPlayers) || 2,
+            game_notes: formData.notes,
+            status: tableStatus
           }])
           .select()
           .single();
@@ -272,64 +273,249 @@
           return;
         }
 
-        const playersToInsert = [
-          {
-            booking_id: bookingData.id,
-            player_id: profile.id,
-            is_guest: false,
-            guest_name: `${profile.display_name} (Host)`,
-            invite_status: 'confirmed'
-          }
-        ];
+        const rowsWithId = playersToInsert.map(p => ({ ...p, booking_id: bookingData.id }));
+        await supabase.from('booking_players').insert(rowsWithId);
 
-        if (guestName) {
-          playersToInsert.push({
-            booking_id: bookingData.id,
-            is_guest: true,
-            guest_name: `${guestName} (Guest)`,
-            brought_by: profile.id,
-            invite_status: 'confirmed'
-          });
-        }
-
-        await supabase.from('booking_players').insert(playersToInsert);
         setIsBookModalOpen(false);
+        setSelectedNightId(formData.nightId);
+        fetchBookings();
+
+        const sysChannel = getSystemChannel(formData.systemName);
+        const seatsLeft = Number(formData.maxPlayers) - playersToInsert.length;
+
+        if (seatsLeft > 0) {
+          pushNotification('discord', sysChannel, `🟢 OPEN TABLE: ${currentUser.display_name} booked Table #${nextTableNum} for ${formData.systemName} with ${seatsLeft} open seat(s)!`);
+        } else {
+          pushNotification('quiet', 'Silent DB Save', `Table #${nextTableNum} pre-arranged. No Discord spam sent.`);
+        }
+      };
+
+      const handleUpdateTableBooking = async (bookingId, updatedFields) => {
+        await supabase
+          .from('table_bookings')
+          .update({
+            game_system_id: updatedFields.systemId,
+            max_players: Number(updatedFields.maxPlayers),
+            game_notes: updatedFields.notes
+          })
+          .eq('id', bookingId);
+
+        setEditingBooking(null);
         fetchBookings();
       };
 
-      const handleJoinTable = async (bookingId) => {
-        if (!session || !profile) {
+      const handleJoinTable = async (bookingId, guestNameInput = null) => {
+        if (!currentUser) {
           setShowAuthModal(true);
           return;
         }
 
+        const isGuestPass = Boolean(guestNameInput);
+        const nameToUse = isGuestPass
+          ? `${guestNameInput} (Guest of ${currentUser.display_name.split(' ')[0]})`
+          : currentUser.display_name;
+
         await supabase.from('booking_players').insert([{
           booking_id: bookingId,
-          player_id: profile.id,
-          is_guest: false,
-          guest_name: profile.display_name,
+          player_id: isGuestPass ? null : currentUser.id,
+          is_guest: isGuestPass,
+          guest_name: nameToUse,
+          brought_by: isGuestPass ? currentUser.id : null,
           invite_status: 'confirmed'
         }]);
+
         fetchBookings();
       };
 
-      const handleCancelBooking = async (bookingId) => {
-        if (!confirm('Are you sure you want to release this table back to the club?')) return;
-        await supabase.from('table_bookings').delete().eq('id', bookingId);
+      const handleLeaveOrCancelClick = (booking) => {
+        const isHost = booking.host_id === currentUser.id;
+        const otherRealMembers = booking.players?.filter(p => p.player_id !== currentUser.id && !p.is_guest) || [];
+
+        if (isHost && otherRealMembers.length > 0) {
+          setCancelModalBooking(booking);
+        } else if (isHost && otherRealMembers.length === 0) {
+          supabase.from('table_bookings').delete().eq('id', booking.id).then(fetchBookings);
+        } else {
+          supabase.from('booking_players')
+            .delete()
+            .eq('booking_id', booking.id)
+            .or(`player_id.eq.${currentUser.id},brought_by.eq.${currentUser.id}`)
+            .then(fetchBookings);
+        }
+      };
+
+      const handleConfirmTransferOwnership = async (bookingId, newHostId) => {
+        await supabase.from('table_bookings').update({ host_id: newHostId, status: 'open' }).eq('id', bookingId);
+        await supabase.from('booking_players')
+          .delete()
+          .eq('booking_id', bookingId)
+          .or(`player_id.eq.${currentUser.id},brought_by.eq.${currentUser.id}`);
+
+        setCancelModalBooking(null);
         fetchBookings();
+      };
+
+      const handleConfirmWipeTable = async (bookingId) => {
+        await supabase.from('table_bookings').delete().eq('id', bookingId);
+        setCancelModalBooking(null);
+        fetchBookings();
+      };
+
+      // --- ACTIONS: NOTICE BOARD (LFG) ---
+      const handleIssueChallenge = async ({ post, nightId, systemId, systemName, notes }) => {
+        if (!currentUser) {
+          setShowAuthModal(true);
+          return;
+        }
+
+        const nextTableNum = getNextAvailableTableNumber(nightId);
+        if (!nextTableNum) {
+          alert('No tables left on that date!');
+          return;
+        }
+
+        const challengee = getUser(post.user_id);
+        const { data: bookingData, error: bErr } = await supabase
+          .from('table_bookings')
+          .insert([{
+            club_id: CLUB_ID,
+            club_night_id: nightId,
+            table_number: nextTableNum,
+            host_id: currentUser.id,
+            game_system_id: systemId,
+            max_players: 2,
+            game_notes: notes || `Notice Board Challenge vs ${challengee.display_name}`,
+            status: 'pending_challenge'
+          }])
+          .select()
+          .single();
+
+        if (bErr) {
+          alert('Error sending challenge: ' + bErr.message);
+          return;
+        }
+
+        await supabase.from('booking_players').insert([
+          { booking_id: bookingData.id, player_id: currentUser.id, is_guest: false, guest_name: currentUser.display_name, invite_status: 'confirmed' },
+          { booking_id: bookingData.id, player_id: post.user_id, is_guest: false, guest_name: challengee.display_name, invite_status: 'invited_challenged' }
+        ]);
+
+        setChallengeTargetPost(null);
+        fetchBookings();
+
+        const channel = getSystemChannel(systemName);
+        pushNotification('discord', channel, `⚔️ CHALLENGE: ${currentUser.display_name} challenged ${challengee.display_name} to ${systemName} on Table #${nextTableNum}!`);
+      };
+
+      const handleRespondToChallenge = async (bookingId, accept) => {
+        if (accept) {
+          await supabase.from('table_bookings').update({ status: 'confirmed' }).eq('id', bookingId);
+          await supabase.from('booking_players')
+            .update({ invite_status: 'confirmed' })
+            .eq('booking_id', bookingId)
+            .eq('player_id', currentUser.id);
+        } else {
+          await supabase.from('table_bookings').delete().eq('id', bookingId);
+        }
+        fetchBookings();
+      };
+
+      const handleCreateLfgPost = async (postData) => {
+        if (!currentUser) {
+          setShowAuthModal(true);
+          return;
+        }
+
+        await supabase.from('lfg_posts').insert([{
+          club_id: CLUB_ID,
+          user_id: currentUser.id,
+          available_night_ids: postData.availableNightIds,
+          games: postData.games,
+          vibe: postData.vibe,
+          notes: postData.notes
+        }]);
+
+        setIsLfgModalOpen(false);
+        const { data } = await supabase.from('lfg_posts').select('*').order('created_at', { ascending: false });
+        if (data) setLfgPosts(data);
+      };
+
+      const handleDeleteLfgPost = async (postId) => {
+        await supabase.from('lfg_posts').delete().eq('id', postId);
+        setLfgPosts(prev => prev.filter(p => p.id !== postId));
+      };
+
+      // --- ACTIONS: COMMITTEE & GDPR ---
+      const handleToggleAttendance = async (bookingId, playerId) => {
+        const booking = bookings.find(b => b.id === bookingId);
+        const player = booking?.players?.find(p => p.player_id === playerId);
+        if (!player) return;
+
+        const nextVal = !player.attended;
+        await supabase.from('booking_players').update({ attended: nextVal }).eq('id', player.id);
+
+        const delta = nextVal ? 1 : -1;
+        const targetUser = users.find(u => u.id === playerId);
+        if (targetUser) {
+          const newAtt = Math.max(0, (targetUser.attendance || 0) + delta);
+          await supabase.from('profiles').update({ attendance: newAtt }).eq('id', playerId);
+        }
+        fetchBookings();
+      };
+
+      const handleAdminMoveDate = async (nightId, newLabel, newNotes) => {
+        await supabase.from('club_nights').update({ label: newLabel, notes: newNotes }).eq('id', nightId);
+        fetchInitialData();
+        pushNotification('discord', '#club-announcements', `📢 DATE MOVE: Club night updated to ${newLabel}. Bookings transferred!`);
+      };
+
+      const handleAdminCancelDate = async (nightId) => {
+        await supabase.from('club_nights').update({ status: 'cancelled' }).eq('id', nightId);
+        await supabase.from('table_bookings').delete().eq('club_night_id', nightId);
+        fetchInitialData();
+      };
+
+      const handleDeleteProfile = async (userId) => {
+        await supabase.from('profiles').delete().eq('id', userId);
+        if (currentUser?.id === userId) {
+          await supabase.auth.signOut();
+        }
+        fetchInitialData();
       };
 
       if (loading) {
         return (
           <div className="min-h-screen flex items-center justify-center bg-slate-950 text-amber-400 font-bold">
-            Loading Herd the Nerds Portal...
+            Connecting to Herd the Nerds Live Database...
           </div>
         );
       }
 
       return (
         <div className="min-h-screen flex flex-col">
-          {/* HEADER */}
+          {/* TARGETED DISCORD & EMAIL OUTBOUND FEED */}
+          <div className="bg-slate-900/95 border-b border-slate-800 px-4 py-2 text-xs">
+            <div className="max-w-7xl mx-auto flex items-center gap-3 overflow-x-auto custom-scrollbar">
+              <div className="flex items-center gap-1.5 shrink-0 text-xs font-semibold text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2.5 py-1 rounded-md">
+                <span>📡 Smart Outbound Router (Per-System Discord + Email)</span>
+              </div>
+              {notificationFeed[0] && (
+                <div className="text-xs text-slate-300 truncate flex items-center gap-2">
+                  <span className="text-slate-500 font-mono">[{notificationFeed[0].time}]</span>
+                  <span className={`px-2 py-0.5 rounded font-bold text-[11px] ${
+                    notificationFeed[0].type === 'discord'
+                      ? 'bg-[#5865F2]/20 text-[#5865F2] border border-[#5865F2]/40'
+                      : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                  }`}>
+                    {notificationFeed[0].target}
+                  </span>
+                  <span>{notificationFeed[0].text}</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* MAIN HEADER */}
           <header className="bg-slate-900 border-b border-slate-800 sticky top-0 z-20">
             <div className="max-w-7xl mx-auto px-4 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
               <div className="flex items-center gap-3">
@@ -340,14 +526,14 @@
                   <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
                     Herd the Nerds
                     <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
-                      ● Live
+                      ● Live Sync
                     </span>
                   </h1>
                   <p className="text-xs text-slate-400">Club Night Table Allocations & Matchmaking</p>
                 </div>
               </div>
 
-              {/* Navigation Tabs */}
+              {/* Navigation Pills */}
               <div className="flex items-center gap-2 bg-slate-950 p-1.5 rounded-xl border border-slate-800">
                 <button
                   onClick={() => setActiveTab('tables')}
@@ -355,9 +541,21 @@
                     activeTab === 'tables' ? 'bg-amber-500 text-slate-950 shadow' : 'text-slate-300 hover:text-white'
                   }`}
                 >
-                  <span>📅 Tables</span>
+                  <span>📅 Book a Table</span>
                   <span className={`text-xs px-1.5 py-0.5 rounded-full ${activeTab === 'tables' ? 'bg-slate-950/20 text-slate-950 font-bold' : 'bg-slate-800 text-slate-400'}`}>
                     {tablesRemaining} left
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setActiveTab('lfg')}
+                  className={`px-4 py-2 rounded-lg text-sm font-semibold transition flex items-center gap-2 ${
+                    activeTab === 'lfg' ? 'bg-amber-500 text-slate-950 shadow' : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <span>⚔️ Find a Buddy (LFG)</span>
+                  <span className={`text-xs px-1.5 py-0.5 rounded-full ${activeTab === 'lfg' ? 'bg-slate-950/20 text-slate-950 font-bold' : 'bg-slate-800 text-slate-400'}`}>
+                    {lfgPosts.length}
                   </span>
                 </button>
 
@@ -368,51 +566,108 @@
                       activeTab === 'admin' ? 'bg-amber-500 text-slate-950 shadow' : 'text-slate-300 hover:text-white'
                     }`}
                   >
-                    <span>🛡️ Committee</span>
+                    <span>🛡️ Committee Admin</span>
                   </button>
                 )}
               </div>
 
-              {/* Account / Login CTA */}
-              <div>
-                {session && profile ? (
-                  <div className="flex items-center gap-3 bg-slate-950 border border-slate-800 px-3 py-1.5 rounded-xl text-xs">
-                    <div>
-                      <span className="font-bold text-amber-400">{profile.display_name}</span>
-                      <span className="text-slate-500 ml-1">({profile.discord_handle})</span>
-                      {isAdmin && <span className="ml-2 px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold text-[10px]">ADMIN</span>}
+              {/* User Profile Pill */}
+              {currentUser ? (
+                <button
+                  onClick={() => setIsProfileModalOpen(true)}
+                  className="flex items-center gap-3 bg-slate-950 hover:bg-slate-800/80 border border-slate-800 px-3.5 py-2 rounded-xl transition text-left"
+                >
+                  <div>
+                    <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <span>👤 {currentUser.display_name}</span>
+                      {currentUser.discord_handle && (
+                        <span className="text-[10px] bg-[#5865F2]/20 text-[#5865F2] border border-[#5865F2]/40 px-1.5 py-0.2 rounded">
+                          {currentUser.discord_handle}
+                        </span>
+                      )}
+                      {isAdmin && (
+                        <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/40 px-1.5 py-0.2 rounded font-bold">
+                          ADMIN
+                        </span>
+                      )}
                     </div>
-                    <button
-                      onClick={() => supabase.auth.signOut()}
-                      className="text-slate-400 hover:text-rose-400 font-bold ml-2 border-l border-slate-800 pl-2"
-                    >
-                      Log Out
-                    </button>
+                    <div className="text-[11px] text-amber-400 font-medium">
+                      🏅 {currentUser.attendance || 0} Attendances • Click for Settings
+                    </div>
                   </div>
-                ) : (
-                  <button
-                    onClick={() => setShowAuthModal(true)}
-                    className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-lg shadow-amber-500/20 transition"
-                  >
-                    Member Login / Sign Up
-                  </button>
-                )}
-              </div>
+                </button>
+              ) : (
+                <button
+                  onClick={() => setShowAuthModal(true)}
+                  className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-lg shadow-amber-500/20 transition"
+                >
+                  Member Login / Sign Up
+                </button>
+              )}
             </div>
           </header>
 
-          {/* MAIN VIEW */}
+          {/* INCOMING CHALLENGE BANNER */}
+          {myIncomingChallenges.length > 0 && (
+            <div className="bg-gradient-to-r from-amber-500/20 via-orange-500/20 to-amber-500/20 border-b border-amber-500/40 px-4 py-3">
+              <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                {myIncomingChallenges.map(chal => {
+                  const challenger = getUser(chal.host_id);
+                  const nightObj = clubNights.find(n => n.id === chal.club_night_id);
+                  return (
+                    <div key={chal.id} className="w-full flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <span className="text-2xl">⚔️</span>
+                        <div>
+                          <div className="text-sm font-bold text-amber-300">
+                            Incoming Game Challenge from {challenger.display_name}!
+                          </div>
+                          <div className="text-xs text-slate-200">
+                            <strong>{nightObj?.label}</strong> • <strong>{chal.game_system?.name}</strong> • Table #{chal.table_number}
+                            {chal.game_notes ? ` — "${chal.game_notes}"` : ''}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          onClick={() => handleRespondToChallenge(chal.id, true)}
+                          className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shadow transition"
+                        >
+                          ✅ Accept & Lock In Table
+                        </button>
+                        <button
+                          onClick={() => handleRespondToChallenge(chal.id, false)}
+                          className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-950 hover:text-rose-300 text-slate-300 font-semibold text-xs border border-slate-700 transition"
+                        >
+                          Decline
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* MAIN APP WORKSPACE */}
           <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-6">
+            {/* TAB 1: TABLE BOOKING LOBBY */}
             {activeTab === 'tables' && selectedNight && (
               <div className="space-y-6">
                 {/* Date Ribbon */}
                 <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
-                  <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
-                    Select Upcoming Club Night (Fortnightly Thursdays)
-                  </h2>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+                    <h2 className="text-sm font-bold uppercase tracking-wider text-slate-400">
+                      1. Select Upcoming Club Night (Fortnightly Thursdays)
+                    </h2>
+                    <span className="text-xs text-slate-400">
+                      Looking for an opponent on a future date? Visit the <button onClick={() => setActiveTab('lfg')} className="text-amber-400 underline font-semibold">Find a Buddy Notice Board</button>
+                    </span>
+                  </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                    {clubNights.map(night => {
+                    {activeClubNights.map(night => {
                       const isSelected = night.id === selectedNight.id;
+                      const freeTables = Math.max(0, night.total_tables - getBookingsForNight(night.id).length);
                       return (
                         <button
                           key={night.id}
@@ -423,10 +678,21 @@
                               : 'bg-slate-950/60 border-slate-800 hover:border-slate-700'
                           }`}
                         >
-                          <span className={`font-bold text-sm ${isSelected ? 'text-amber-400' : 'text-white'}`}>
-                            {night.label}
-                          </span>
-                          <p className="text-xs text-slate-400 mt-1 line-clamp-1">{night.notes}</p>
+                          <div className="flex items-center justify-between w-full mb-1">
+                            <span className={`font-bold text-sm ${isSelected ? 'text-amber-400' : 'text-white'}`}>
+                              {night.label}
+                            </span>
+                            <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                              freeTables > 4
+                                ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                                : freeTables > 0
+                                ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                                : 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
+                            }`}>
+                              {freeTables} / {night.total_tables} free
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-400 line-clamp-1">{night.notes}</p>
                         </button>
                       );
                     })}
@@ -434,353 +700,1182 @@
                 </div>
 
                 {/* Capacity Summary & Book Action */}
-                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                   <div>
-                    <h2 className="text-2xl font-extrabold text-white">{selectedNight.label}</h2>
-                    <p className="text-xs text-slate-400 mt-1">
-                      {selectedNight.notes} • <strong>{tablesRemaining} tables available</strong> for booking.
+                    <div className="flex items-center gap-3">
+                      <h2 className="text-2xl font-extrabold text-white">{selectedNight.label}</h2>
+                      <span className="px-2.5 py-1 rounded-md text-xs font-bold bg-slate-800 text-amber-400 border border-slate-700">
+                        {tablesBookedCount} Booked • {tablesRemaining} Available
+                      </span>
+                    </div>
+                    <p className="text-sm text-slate-400 mt-1">
+                      {selectedNight.notes} • <strong>{totalPlayersBookedTonight} attendees</strong> across {tablesBookedCount} tables.
                     </p>
                   </div>
                   <button
                     onClick={() => {
-                      if (!session || !profile) setShowAuthModal(true);
+                      if (!currentUser) setShowAuthModal(true);
                       else setIsBookModalOpen(true);
                     }}
                     disabled={tablesRemaining === 0}
-                    className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-sm shadow-lg shadow-amber-500/20 transition"
+                    className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-sm shadow-lg shadow-amber-500/20 transition flex items-center gap-2"
                   >
-                    ➕ Book a Club Table
+                    <span>➕ Book a Club Table</span>
                   </button>
                 </div>
 
-                {/* Tables Grid */}
+                {/* Table Cards Grid */}
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {bookings.map(b => {
-                    const seatedCount = b.players?.length || 0;
-                    const seatsLeft = Math.max(0, b.max_players - seatedCount);
-                    const canManage = isAdmin || (profile && b.host_id === profile.id);
-                    const alreadySeated = profile && b.players?.some(p => p.player_id === profile.id);
+                  {currentNightBookings.map(booking => {
+                    const seatedCount = booking.players?.length || 0;
+                    const seatsLeft = Math.max(0, booking.max_players - seatedCount);
+                    const isUserInBooking = currentUser && booking.players?.some(p => p.player_id === currentUser.id);
+                    const isHost = currentUser && booking.host_id === currentUser.id;
+                    const isPending = booking.status === 'pending_challenge';
+                    const canEdit = isHost || isAdmin;
 
                     return (
-                      <div key={b.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between space-y-4">
+                      <div
+                        key={booking.id}
+                        className={`rounded-2xl border p-5 flex flex-col justify-between transition ${
+                          isPending
+                            ? 'bg-amber-950/15 border-amber-500/40'
+                            : seatsLeft > 0
+                            ? 'bg-slate-900 border-slate-800 hover:border-slate-700'
+                            : 'bg-slate-900/70 border-slate-800/80'
+                        }`}
+                      >
                         <div>
                           <div className="flex items-center justify-between gap-2 mb-3">
-                            <span className="px-2.5 py-1 rounded-lg bg-slate-950 text-amber-400 font-mono text-xs font-bold border border-slate-800">
-                              Table #{b.table_number}
-                            </span>
-                            <span className="text-[11px] text-indigo-400 font-mono">
-                              {b.game_system?.discord_channel}
-                            </span>
+                            <div className="flex items-center gap-2">
+                              <span className="px-2.5 py-1 rounded-lg bg-slate-950 text-amber-400 font-mono text-xs font-bold border border-slate-800">
+                                Table #{booking.table_number}
+                              </span>
+                              <span className="text-[11px] text-indigo-400 font-mono">
+                                {booking.game_system?.discord_channel}
+                              </span>
+                            </div>
+                            {isPending ? (
+                              <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                                ⏳ Challenge Pending
+                              </span>
+                            ) : seatsLeft > 0 ? (
+                              <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                🟢 {seatsLeft} {seatsLeft === 1 ? 'seat' : 'seats'} open
+                              </span>
+                            ) : (
+                              <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-slate-800 text-slate-300 border border-slate-700">
+                                🔒 Full ({seatedCount}/{booking.max_players})
+                              </span>
+                            )}
                           </div>
 
-                          <h4 className="text-lg font-bold text-white mb-2">{b.game_system?.name}</h4>
+                          <div className="flex items-start justify-between gap-2 mb-2">
+                            <h4 className="text-lg font-bold text-white">{booking.game_system?.name}</h4>
+                            {canEdit && (
+                              <button
+                                onClick={() => setEditingBooking(booking)}
+                                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-amber-500 hover:text-slate-950 text-amber-300 text-xs font-bold transition shrink-0"
+                              >
+                                ✏️ Edit Table
+                              </button>
+                            )}
+                          </div>
 
-                          {b.game_notes && (
-                            <p className="text-xs text-slate-300 bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/80 mb-3">
-                              "{b.game_notes}"
+                          {booking.game_notes && (
+                            <p className="text-xs text-slate-300 bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/80 mb-4">
+                              "{booking.game_notes}"
                             </p>
                           )}
 
-                          <div className="space-y-1.5">
+                          <div className="space-y-1.5 mb-4">
                             <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                              Players Seated ({seatedCount} / {b.max_players})
+                              Seated Players ({seatedCount} / {booking.max_players})
                             </div>
-                            {b.players?.map((p, idx) => (
-                              <div key={p.id || idx} className="bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800 text-xs flex justify-between">
-                                <span className="font-semibold text-white">{p.guest_name}</span>
-                                <span className="text-[10px] text-emerald-400 font-bold">Confirmed</span>
-                              </div>
-                            ))}
-                            {Array.from({ length: seatsLeft }).map((_, i) => (
-                              <div key={i} className="border border-dashed border-slate-800 px-3 py-1.5 rounded-lg text-xs text-slate-500">
-                                Open Seat #{seatedCount + i + 1}
-                              </div>
-                            ))}
+                            <div className="space-y-1.5">
+                              {booking.players?.map(p => (
+                                <div key={p.id} className="flex items-center justify-between bg-slate-950/80 px-3 py-1.5 rounded-lg border border-slate-800 text-xs">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-semibold text-slate-100">{p.guest_name}</span>
+                                    {p.is_guest && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 font-semibold">Guest Pass</span>}
+                                    {p.player_id === booking.host_id && <span className="text-[10px] px-1.5 py-0.2 bg-amber-500/20 text-amber-300 rounded font-semibold">Host</span>}
+                                  </div>
+                                  <span className="text-[10px] text-emerald-400 font-bold">{p.invite_status}</span>
+                                </div>
+                              ))}
+                              {Array.from({ length: seatsLeft }).map((_, idx) => (
+                                <div key={idx} className="border border-dashed border-slate-800 px-3 py-1.5 rounded-lg text-xs text-slate-500">
+                                  Open Seat #{seatedCount + idx + 1}
+                                </div>
+                              ))}
+                            </div>
                           </div>
                         </div>
 
-                        <div className="pt-3 border-t border-slate-800 flex gap-2">
-                          {seatsLeft > 0 && !alreadySeated ? (
+                        {/* Actions */}
+                        <div className="pt-3 border-t border-slate-800/80 flex flex-col gap-2">
+                          {isUserInBooking && seatsLeft > 0 && !isPending && (
                             <button
-                              onClick={() => handleJoinTable(b.id)}
-                              className="flex-1 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs"
+                              onClick={() => {
+                                const gName = prompt('Enter the first name of your Guest:');
+                                if (gName && gName.trim()) handleJoinTable(booking.id, gName.trim());
+                              }}
+                              className="w-full py-1.5 px-3 rounded-xl bg-purple-950/50 hover:bg-purple-900/60 text-purple-300 border border-purple-700/50 font-semibold text-xs transition"
+                            >
+                              🎟️ + Add a Guest to This Table
+                            </button>
+                          )}
+
+                          {isUserInBooking ? (
+                            <button
+                              onClick={() => handleLeaveOrCancelClick(booking)}
+                              className="w-full py-2 px-3 rounded-xl bg-rose-950/50 hover:bg-rose-900/60 text-rose-300 border border-rose-800/60 font-semibold text-xs transition"
+                            >
+                              {isHost
+                                ? (booking.players?.filter(p => !p.is_guest).length > 1 ? '⚙️ Drop Out: Transfer Host or Cancel' : '🗑️ Cancel Table Booking')
+                                : '👋 Leave Table'}
+                            </button>
+                          ) : seatsLeft > 0 && !isPending ? (
+                            <button
+                              onClick={() => handleJoinTable(booking.id)}
+                              className="w-full py-2 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shadow transition"
                             >
                               ➕ Join Table
                             </button>
-                          ) : alreadySeated ? (
-                            <span className="flex-1 text-center py-2 text-xs text-emerald-400 font-bold">You are seated</span>
                           ) : (
-                            <span className="flex-1 text-center py-2 text-xs text-slate-500">Table Full</span>
-                          )}
-
-                          {canManage && (
-                            <button
-                              onClick={() => handleCancelBooking(b.id)}
-                              className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-rose-950 text-slate-400 hover:text-rose-300 text-xs"
-                              title="Cancel / Release Table"
-                            >
-                              🗑️
-                            </button>
+                            <span className="text-xs text-slate-500 w-full text-center py-1">
+                              {isPending ? 'Awaiting Challenge Response' : 'Table Full'}
+                            </span>
                           )}
                         </div>
                       </div>
                     );
                   })}
+
+                  {/* Empty Slot CTA Card */}
+                  {tablesRemaining > 0 && (
+                    <button
+                      onClick={() => {
+                        if (!currentUser) setShowAuthModal(true);
+                        else setIsBookModalOpen(true);
+                      }}
+                      className="rounded-2xl border-2 border-dashed border-slate-800 hover:border-amber-500/60 bg-slate-900/30 hover:bg-slate-900/60 p-6 flex flex-col items-center justify-center text-center group transition min-h-[250px]"
+                    >
+                      <div className="w-12 h-12 rounded-full bg-slate-800 group-hover:bg-amber-500 group-hover:text-slate-950 text-amber-400 flex items-center justify-center text-2xl mb-3 transition">
+                        +
+                      </div>
+                      <h4 className="text-base font-bold text-white group-hover:text-amber-400 transition">
+                        Claim One of {tablesRemaining} Remaining Tables
+                      </h4>
+                      <p className="text-xs text-slate-400 max-w-xs mt-1">
+                        Host an open game, book for you and a club opponent, or register a non-member Guest pass.
+                      </p>
+                    </button>
+                  )}
                 </div>
               </div>
             )}
 
-            {activeTab === 'admin' && isAdmin && (
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
-                <h3 className="text-lg font-bold text-white">🛡️ Committee Table Matrix</h3>
-                <p className="text-xs text-slate-400">Full operational overview for {selectedNight?.label}:</p>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs border-collapse">
-                    <thead>
-                      <tr className="border-b border-slate-800 text-slate-400 uppercase">
-                        <th className="p-2">Table</th>
-                        <th className="p-2">Game System</th>
-                        <th className="p-2">Notes</th>
-                        <th className="p-2">Host & Seated Players</th>
-                        <th className="p-2">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-800">
-                      {bookings.map(b => (
-                        <tr key={b.id}>
-                          <td className="p-2 font-mono text-amber-400 font-bold">#{b.table_number}</td>
-                          <td className="p-2 text-white font-bold">{b.game_system?.name}</td>
-                          <td className="p-2 text-slate-400">{b.game_notes || '—'}</td>
-                          <td className="p-2 text-slate-300">
-                            {b.players?.map(p => p.guest_name).join(', ') || 'None'}
-                          </td>
-                          <td className="p-2">
-                            <button
-                              onClick={() => handleCancelBooking(b.id)}
-                              className="px-2 py-1 rounded bg-rose-950 text-rose-300 text-[10px] font-bold"
-                            >
-                              Release
-                            </button>
-                          </td>
-                        </tr>
+            {/* TAB 2: FIND A BUDDY NOTICE BOARD */}
+            {activeTab === 'lfg' && (
+              <div className="space-y-6">
+                <div className="bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div className="space-y-1 max-w-2xl">
+                    <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                      <span>⚔️ "Find a Buddy" Notice Board</span>
+                    </h2>
+                    <p className="text-sm text-slate-300">
+                      Post your available Thursdays and game systems. Alerts only go out when someone clicks <strong>"Challenge"</strong> on your card (routing to that game system's Discord channel)!
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (!currentUser) setShowAuthModal(true);
+                      else setIsLfgModalOpen(true);
+                    }}
+                    className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm shadow-lg shadow-amber-500/20 shrink-0 transition"
+                  >
+                    📌 Post My Availability
+                  </button>
+                </div>
+
+                {/* Filters */}
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-wrap items-center gap-4">
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs font-bold uppercase text-slate-400">Filter Date:</label>
+                    <select
+                      value={lfgFilterNight}
+                      onChange={(e) => setLfgFilterNight(e.target.value)}
+                      className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white"
+                    >
+                      <option value="ALL">All Upcoming Thursdays</option>
+                      {activeClubNights.map(n => (
+                        <option key={n.id} value={n.id}>{n.label}</option>
                       ))}
-                    </tbody>
-                  </table>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs font-bold uppercase text-slate-400">Filter System:</label>
+                    <select
+                      value={lfgFilterSystem}
+                      onChange={(e) => setLfgFilterSystem(e.target.value)}
+                      className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white"
+                    >
+                      <option value="ALL">All Game Systems</option>
+                      {systems.map(s => (
+                        <option key={s.id} value={s.name}>{s.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* LFG Cards Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                  {lfgPosts
+                    .filter(post => lfgFilterNight === 'ALL' || (post.available_night_ids || []).includes(lfgFilterNight))
+                    .filter(post => lfgFilterSystem === 'ALL' || (post.games || []).some(g => g.systemName === lfgFilterSystem))
+                    .map(post => {
+                      const author = getUser(post.user_id);
+                      const isMe = currentUser && post.user_id === currentUser.id;
+
+                      return (
+                        <div key={post.id} className="bg-slate-900 border border-slate-800 hover:border-slate-700 rounded-2xl p-5 flex flex-col justify-between space-y-4">
+                          <div className="space-y-4">
+                            <div className="flex items-start justify-between gap-2">
+                              <div>
+                                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                                  <span>{author.display_name}</span>
+                                  {isMe && <span className="text-[10px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold">You</span>}
+                                </h3>
+                                <div className="text-xs text-indigo-400 font-medium">
+                                  {author.discord_handle ? `Discord: ${author.discord_handle}` : '📧 Email Member'}
+                                </div>
+                              </div>
+                              <span className="text-[11px] font-bold px-2.5 py-1 rounded-full border bg-emerald-500/15 text-emerald-300 border-emerald-500/30">
+                                {post.vibe}
+                              </span>
+                            </div>
+
+                            {/* Dates */}
+                            <div>
+                              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                                📅 Available Dates:
+                              </div>
+                              <div className="flex flex-wrap gap-1.5">
+                                {(post.available_night_ids || []).map(nId => {
+                                  const nObj = activeClubNights.find(n => n.id === nId);
+                                  if (!nObj) return null;
+                                  return (
+                                    <span key={nId} className="px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/40 text-amber-300 text-xs font-bold">
+                                      {nObj.label}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            </div>
+
+                            {/* Games & Factions */}
+                            <div>
+                              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                                🎲 Systems & Factions:
+                              </div>
+                              <div className="space-y-1.5">
+                                {(post.games || []).map((g, i) => (
+                                  <div key={i} className="bg-slate-950/80 border border-slate-800 rounded-lg px-3 py-2 text-xs">
+                                    <div className="flex items-center justify-between">
+                                      <span className="font-bold text-white">{g.systemName}</span>
+                                      <span className="text-[10px] font-mono text-indigo-400">{getSystemChannel(g.systemName)}</span>
+                                    </div>
+                                    <div className="text-slate-400">Factions: {g.factions}</div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+
+                            {post.notes && (
+                              <p className="text-xs text-slate-300 italic bg-slate-950/50 p-2.5 rounded-lg border border-slate-800/60">
+                                "{post.notes}"
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="pt-3 border-t border-slate-800">
+                            {isMe ? (
+                              <button
+                                onClick={() => handleDeleteLfgPost(post.id)}
+                                className="w-full py-2 rounded-xl bg-slate-800 hover:bg-rose-950 hover:text-rose-300 text-slate-300 text-xs font-semibold transition"
+                              >
+                                🗑️ Remove My Post
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => {
+                                  if (!currentUser) setShowAuthModal(true);
+                                  else setChallengeTargetPost(post);
+                                }}
+                                className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-bold text-xs shadow transition flex items-center justify-center gap-2"
+                              >
+                                <span>⚔️ Challenge {author.display_name.split(' ')[0]} & Book Table</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                 </div>
               </div>
+            )}
+
+            {/* TAB 3: COMMITTEE ADMIN PORTAL */}
+            {activeTab === 'admin' && isAdmin && (
+              <AdminPortal
+                clubNights={activeClubNights}
+                selectedNight={selectedNight}
+                setSelectedNightId={setSelectedNightId}
+                currentNightBookings={currentNightBookings}
+                users={users}
+                getUser={getUser}
+                systems={systems}
+                onToggleAttendance={handleToggleAttendance}
+                onMoveDate={handleAdminMoveDate}
+                onCancelDate={handleAdminCancelDate}
+                onDeleteUser={handleDeleteProfile}
+                onRefresh={fetchInitialData}
+              />
             )}
           </main>
 
           {/* ========================================================================= */}
-          {/* THE PROTOTYPE ONBOARDING & T&CS MODAL RESTORED FULLY                      */}
+          {/* ALL PRODUCTION MODALS (RESTORED EXACTLY AS IN PROTOTYPE)                  */}
           {/* ========================================================================= */}
-          {showAuthModal && (
-            <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
-              <div className="bg-slate-900 border border-slate-700/80 rounded-2xl max-w-lg w-full p-6 sm:p-7 space-y-5 shadow-2xl relative">
-                <button
-                  onClick={() => setShowAuthModal(false)}
-                  className="absolute top-5 right-5 text-slate-400 hover:text-white text-lg font-bold"
-                >
-                  ✕
-                </button>
 
-                <div className="border-b border-slate-800 pb-3">
-                  <h3 className="text-xl font-extrabold text-white flex items-center gap-2">
-                    <span>👋 Welcome to Herd the Nerds!</span>
-                  </h3>
-                  <p className="text-xs text-slate-400 mt-1">
-                    First-Time Member Onboarding & Data Protection Agreement
-                  </p>
-                </div>
-
-                <form onSubmit={handleCompleteOnboarding} className="space-y-4 text-xs">
-                  {/* Step 1: Sign-in Options */}
-                  {!session && (
-                    <div className="space-y-2">
-                      <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                        1. Choose Sign-In Method
-                      </label>
-                      <div className="grid grid-cols-2 gap-2">
-                        <button
-                          type="button"
-                          onClick={handleDiscordSignIn}
-                          className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold transition"
-                        >
-                          <span>💬 Continue with Discord</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setAuthMethod('email')}
-                          className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl border transition font-semibold ${
-                            authMethod === 'email'
-                              ? 'bg-slate-800 border-amber-500 text-amber-400'
-                              : 'bg-slate-950/60 border-slate-800 text-slate-400'
-                          }`}
-                        >
-                          <span>✉️ Sign Up with Email</span>
-                        </button>
-                      </div>
-
-                      {authMethod === 'email' && (
-                        <div className="pt-2">
-                          <label className="block text-slate-300 font-medium mb-1">Email Address</label>
-                          <input
-                            required
-                            type="email"
-                            value={inputEmail}
-                            onChange={(e) => setInputEmail(e.target.value)}
-                            placeholder="you@example.com"
-                            className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white focus:border-amber-500 focus:outline-none"
-                          />
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Step 2: Display Profile Fields */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                        Display Name
-                      </label>
-                      <input
-                        required
-                        type="text"
-                        value={inputName}
-                        onChange={(e) => setInputName(e.target.value)}
-                        placeholder="e.g. Roboute Guilliman"
-                        className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white focus:border-amber-500 focus:outline-none"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                        Discord Handle
-                      </label>
-                      <input
-                        required
-                        type="text"
-                        value={inputDiscord}
-                        onChange={(e) => setInputDiscord(e.target.value)}
-                        placeholder="@username"
-                        className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white focus:border-amber-500 focus:outline-none"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Step 3: Terms of Use & UK GDPR Notice */}
-                  <div className="space-y-2">
-                    <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 max-h-36 overflow-y-auto custom-scrollbar text-[11px] text-slate-400 space-y-2">
-                      <div className="font-bold text-amber-400 uppercase tracking-wide">
-                        Herd the Nerds — Terms of Use & UK GDPR Data Protection Notice
-                      </div>
-                      <p>
-                        <strong>1. Data We Collect:</strong> To manage club night table allocations and game pairings, Herd the Nerds stores only your chosen Display Name, your login identifier (Email address or Discord Username/ID), and your club attendance count.
-                      </p>
-                      <p>
-                        <strong>2. How Your Data Is Used:</strong> Your Display Name and Discord handle (if applicable) are displayed on club table cards and the "Find a Buddy" notice board so other club members can arrange games with you. Your email address is strictly private and is never shared with third parties or visible to other members.
-                      </p>
-                      <p>
-                        <strong>3. Communications & Opt-Out:</strong> If you use Email login, you will only receive transactional magic links and critical table update alerts that you opt into below.
-                      </p>
-                      <p>
-                        <strong>4. Right of Deletion (GDPR):</strong> You may request the immediate deletion of your profile and data at any time via the club committee or self-service account removal.
-                      </p>
-                    </div>
-
-                    {/* Checkboxes */}
-                    <label className="flex items-start gap-2.5 cursor-pointer pt-1">
-                      <input
-                        type="checkbox"
-                        checked={termsAccepted}
-                        onChange={(e) => setTermsAccepted(e.target.checked)}
-                        className="mt-0.5 rounded border-slate-700 text-amber-500 focus:ring-0"
-                      />
-                      <span className="text-slate-300 text-[11px] leading-relaxed">
-                        I agree to the Herd the Nerds <strong>Terms & Conditions</strong> and <strong>Data Protection Policy</strong> (Required to create a profile).
-                      </span>
-                    </label>
-
-                    <label className="flex items-start gap-2.5 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={emailAlertsOptIn}
-                        onChange={(e) => setEmailAlertsOptIn(e.target.checked)}
-                        className="mt-0.5 rounded border-slate-700 text-amber-500 focus:ring-0"
-                      />
-                      <span className="text-slate-400 text-[11px] leading-relaxed">
-                        Send me direct email alerts when I am challenged, my opponent drops out, or my booked club night date changes (You can mute this anytime).
-                      </span>
-                    </label>
-                  </div>
-
-                  {/* Actions */}
-                  <div className="flex items-center justify-end gap-3 pt-2">
-                    <button
-                      type="button"
-                      onClick={() => setShowAuthModal(false)}
-                      className="px-4 py-2.5 rounded-xl text-slate-400 hover:text-white font-medium transition"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={submittingAuth}
-                      className="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold shadow-lg shadow-emerald-500/20 transition flex items-center gap-1.5"
-                    >
-                      <span>✓</span>
-                      <span>{submittingAuth ? 'Processing...' : 'Agree & Create My Profile'}</span>
-                    </button>
-                  </div>
-                </form>
-              </div>
-            </div>
+          {/* 1. BOOK A TABLE MODAL */}
+          {isBookModalOpen && (
+            <BookTableModal
+              clubNights={activeClubNights}
+              defaultNightId={selectedNight.id}
+              systems={systems}
+              users={users}
+              currentUserId={currentUser?.id}
+              onClose={() => setIsBookModalOpen(false)}
+              onSubmit={handleCreateTableBooking}
+            />
           )}
 
-          {/* BOOK TABLE MODAL */}
-          {isBookModalOpen && (
-            <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-              <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
-                <div className="flex justify-between items-center border-b border-slate-800 pb-2">
-                  <h3 className="font-bold text-white">Book a Club Table</h3>
-                  <button onClick={() => setIsBookModalOpen(false)}>✕</button>
+          {/* 2. EDIT TABLE MODAL */}
+          {editingBooking && (
+            <EditTableModal
+              booking={editingBooking}
+              systems={systems}
+              onClose={() => setEditingBooking(null)}
+              onSave={handleUpdateTableBooking}
+            />
+          )}
+
+          {/* 3. CHALLENGE PLAYER MODAL */}
+          {challengeTargetPost && (
+            <ChallengePlayerModal
+              post={challengeTargetPost}
+              challengee={getUser(challengeTargetPost.user_id)}
+              clubNights={activeClubNights}
+              systems={systems}
+              getBookingsForNight={getBookingsForNight}
+              getSystemChannel={getSystemChannel}
+              onClose={() => setChallengeTargetPost(null)}
+              onSubmit={handleIssueChallenge}
+            />
+          )}
+
+          {/* 4. POST LFG MODAL */}
+          {isLfgModalOpen && (
+            <CreateLfgPostModal
+              clubNights={activeClubNights}
+              systems={systems}
+              onClose={() => setIsLfgModalOpen(false)}
+              onSubmit={handleCreateLfgPost}
+            />
+          )}
+
+          {/* 5. CANCEL OR TRANSFER MODAL */}
+          {cancelModalBooking && (
+            <CancelOrTransferModal
+              booking={cancelModalBooking}
+              getUser={getUser}
+              currentUserId={currentUser?.id}
+              onClose={() => setCancelModalBooking(null)}
+              onTransfer={handleConfirmTransferOwnership}
+              onWipeTable={handleConfirmWipeTable}
+            />
+          )}
+
+          {/* 6. USER PROFILE & GDPR MODAL */}
+          {isProfileModalOpen && currentUser && (
+            <UserProfileModal
+              user={currentUser}
+              onClose={() => setIsProfileModalOpen(false)}
+              onToggleEmailAlerts={async () => {
+                const next = !currentUser.email_notifications;
+                await supabase.from('profiles').update({ email_notifications: next }).eq('id', currentUser.id);
+                setCurrentUser(prev => ({ ...prev, email_notifications: next }));
+              }}
+              onDeleteSelf={() => handleDeleteProfile(currentUser.id)}
+              onOpenTerms={() => setTermsPreviewOpen(true)}
+              onSignOut={() => {
+                supabase.auth.signOut();
+                setIsProfileModalOpen(false);
+              }}
+            />
+          )}
+
+          {/* 7. FULL ONBOARDING & T&CS MODAL */}
+          {showAuthModal && (
+            <OnboardingAuthModal
+              session={session}
+              onClose={() => setShowAuthModal(false)}
+              onProfileSaved={(newProf) => {
+                setCurrentUser(newProf);
+                setShowAuthModal(false);
+              }}
+            />
+          )}
+
+          {/* 8. TERMS MODAL */}
+          {termsPreviewOpen && (
+            <TermsAndConditionsModal onClose={() => setTermsPreviewOpen(false)} />
+          )}
+        </div>
+      );
+    }
+
+    // --- COMPONENT: BOOK TABLE MODAL ---
+    function BookTableModal({ clubNights, defaultNightId, systems, users, currentUserId, onClose, onSubmit }) {
+      const [nightId, setNightId] = useState(defaultNightId);
+      const [systemId, setSystemId] = useState(systems[0]?.id || '');
+      const [maxPlayers, setMaxPlayers] = useState(2);
+      const [joinType, setJoinType] = useState('open_lobby');
+      const [opponentId, setOpponentId] = useState('');
+      const [guestName, setGuestName] = useState('');
+      const [notes, setNotes] = useState('');
+
+      const selectedSys = systems.find(s => s.id === systemId);
+
+      const handleSysChange = (newSysId) => {
+        setSystemId(newSysId);
+        const found = systems.find(s => s.id === newSysId);
+        if (found) setMaxPlayers(found.default_players || 2);
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-lg font-bold text-white">📅 Book a Club Table</h3>
+              <button onClick={onClose} className="text-slate-400 hover:text-white text-sm">✕</button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-400 mb-1">1. Club Night Date</label>
+                <select value={nightId} onChange={(e) => setNightId(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white">
+                  {clubNights.map(n => <option key={n.id} value={n.id}>{n.label}</option>)}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-bold uppercase text-slate-400 mb-1">2. Game System</label>
+                  <select value={systemId} onChange={(e) => handleSysChange(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white">
+                    {systems.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
                 </div>
-                <form onSubmit={(e) => {
-                  e.preventDefault();
-                  const fd = new FormData(e.target);
-                  handleCreateBooking({
-                    systemId: fd.get('systemId'),
-                    maxPlayers: fd.get('maxPlayers'),
-                    notes: fd.get('notes'),
-                    guestName: fd.get('guestName')
-                  });
-                }} className="space-y-3 text-xs">
-                  <div>
-                    <label className="block text-slate-400 font-bold mb-1">Game System</label>
-                    <select name="systemId" className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white">
-                      {systems.map(s => (
-                        <option key={s.id} value={s.id}>{s.name} ({s.discord_channel})</option>
+                <div>
+                  <label className="block text-xs font-bold uppercase text-slate-400 mb-1">Max Players</label>
+                  <input type="number" min="1" max="8" value={maxPlayers} onChange={(e) => setMaxPlayers(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white" />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-400 mb-1.5">3. Who is playing?</label>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <button type="button" onClick={() => setJoinType('open_lobby')} className={`p-3 rounded-xl border text-left text-xs transition ${joinType === 'open_lobby' ? 'bg-amber-500/15 border-amber-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400'}`}>
+                    <div className="font-bold mb-0.5">🟢 Open Lobby</div>
+                    <div className="text-[11px] opacity-80">Post to {selectedSys?.discord_channel} for others</div>
+                  </button>
+                  <button type="button" onClick={() => setJoinType('already_matched')} className={`p-3 rounded-xl border text-left text-xs transition ${joinType === 'already_matched' ? 'bg-amber-500/15 border-amber-500 text-white' : 'bg-slate-950 border-slate-800 text-slate-400'}`}>
+                    <div className="font-bold mb-0.5">🤝 Club Member</div>
+                    <div className="text-[11px] opacity-80">Pre-arranged game (Silent book)</div>
+                  </button>
+                  <button type="button" onClick={() => setJoinType('bring_guest')} className={`p-3 rounded-xl border text-left text-xs transition ${joinType === 'bring_guest' ? 'bg-purple-500/20 border-purple-400 text-white' : 'bg-slate-950 border-slate-800 text-slate-400'}`}>
+                    <div className="font-bold mb-0.5">🎟️ Bring a Guest</div>
+                    <div className="text-[11px] opacity-80">Non-member visitor pass</div>
+                  </button>
+                </div>
+
+                {joinType === 'already_matched' && (
+                  <div className="mt-3">
+                    <select value={opponentId} onChange={(e) => setOpponentId(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white">
+                      <option value="">-- Select Your Club Opponent --</option>
+                      {users.filter(u => u.id !== currentUserId).map(u => (
+                        <option key={u.id} value={u.id}>{u.display_name} ({u.discord_handle || 'Member'})</option>
                       ))}
                     </select>
                   </div>
-                  <div>
-                    <label className="block text-slate-400 font-bold mb-1">Max Players</label>
-                    <input type="number" name="maxPlayers" defaultValue={2} min={1} max={8} className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white" />
+                )}
+
+                {joinType === 'bring_guest' && (
+                  <div className="mt-3">
+                    <input type="text" placeholder="Enter Guest's Name (e.g. Chris)" value={guestName} onChange={(e) => setGuestName(e.target.value)} className="w-full bg-slate-950 border border-purple-500/50 rounded-xl px-3.5 py-2 text-xs text-white" />
                   </div>
-                  <div>
-                    <label className="block text-slate-400 font-bold mb-1">Game Notes / Points</label>
-                    <input type="text" name="notes" placeholder="e.g. 2000pts Matched Play" className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white" />
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-400 mb-1">4. Game Details / Notes</label>
+                <input type="text" placeholder="e.g. 2000pts Matched Play" value={notes} onChange={(e) => setNotes(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white" />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
+              <button onClick={onClose} className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-semibold">Cancel</button>
+              <button
+                onClick={() => onSubmit({ nightId, systemId, systemName: selectedSys?.name, maxPlayers, joinType, opponentId, guestName, notes })}
+                className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-lg"
+              >
+                Confirm & Book Table
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // --- COMPONENT: EDIT TABLE REQUIREMENTS MODAL ---
+    function EditTableModal({ booking, systems, onClose, onSave }) {
+      const [systemId, setSystemId] = useState(booking.game_system_id);
+      const [maxPlayers, setMaxPlayers] = useState(booking.max_players);
+      const [notes, setNotes] = useState(booking.game_notes || '');
+
+      return (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-amber-500/50 rounded-2xl max-w-md w-full p-6 space-y-5 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div>
+                <h3 className="text-lg font-bold text-white">✏️ Edit Table #{booking.table_number}</h3>
+                <p className="text-xs text-slate-400">Change system, seat count, or notes.</p>
+              </div>
+              <button onClick={onClose} className="text-slate-400 hover:text-white text-sm">✕</button>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-400 mb-1">Game System</label>
+                <select value={systemId} onChange={(e) => setSystemId(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white">
+                  {systems.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-400 mb-1">Max Players</label>
+                <input type="number" min={booking.players?.length || 1} max="8" value={maxPlayers} onChange={(e) => setMaxPlayers(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white" />
+              </div>
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-400 mb-1">Notes</label>
+                <input type="text" value={notes} onChange={(e) => setNotes(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white" />
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
+              <button onClick={onClose} className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-semibold">Cancel</button>
+              <button onClick={() => onSave(booking.id, { systemId, maxPlayers, notes })} className="px-5 py-2.5 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs shadow-lg">Save Changes</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // --- COMPONENT: CHALLENGE PLAYER MODAL ---
+    function ChallengePlayerModal({ post, challengee, clubNights, systems, getBookingsForNight, getSystemChannel, onClose, onSubmit }) {
+      const challengeeAvailableNights = clubNights.filter(n => (post.available_night_ids || []).includes(n.id));
+      const [nightId, setNightId] = useState(challengeeAvailableNights[0]?.id || clubNights[0]?.id);
+      const [systemName, setSystemName] = useState(post.games?.[0]?.systemName || systems[0]?.name);
+      const [notes, setNotes] = useState('');
+
+      const matchedSys = systems.find(s => s.name === systemName);
+
+      return (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-amber-500/50 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div>
+                <h3 className="text-lg font-bold text-amber-400">⚔️ Challenge {challengee.display_name}</h3>
+                <p className="text-xs text-slate-400">Routes alert to {getSystemChannel(systemName)} and reserves a table.</p>
+              </div>
+              <button onClick={onClose} className="text-slate-400 hover:text-white text-sm">✕</button>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold uppercase text-amber-300 mb-1">1. Select Date</label>
+                <select value={nightId} onChange={(e) => setNightId(e.target.value)} className="w-full bg-slate-950 border border-amber-500/40 rounded-xl px-3.5 py-2.5 text-sm text-white font-semibold">
+                  {challengeeAvailableNights.map(n => (
+                    <option key={n.id} value={n.id}>{n.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-400 mb-1">2. Select Game System</label>
+                <select value={systemName} onChange={(e) => setSystemName(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white">
+                  {(post.games || []).map((g, idx) => (
+                    <option key={idx} value={g.systemName}>{g.systemName} (Their Factions: {g.factions})</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-400 mb-1">3. Message / Points</label>
+                <input type="text" placeholder="e.g. Bringing 2000pts Orks!" value={notes} onChange={(e) => setNotes(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white" />
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
+              <button onClick={onClose} className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-semibold">Cancel</button>
+              <button onClick={() => onSubmit({ post, nightId, systemId: matchedSys?.id, systemName, notes })} className="px-5 py-2.5 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs shadow-lg">
+                ⚔️ Send Challenge & Hold Table
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // --- COMPONENT: CREATE LFG MODAL ---
+    function CreateLfgPostModal({ clubNights, systems, onClose, onSubmit }) {
+      const [selectedNightIds, setSelectedNightIds] = useState([clubNights[0]?.id].filter(Boolean));
+      const [games, setGames] = useState([{ systemName: systems[0]?.name || '', factions: '' }]);
+      const [vibe, setVibe] = useState('Friendly / Casual');
+      const [notes, setNotes] = useState('');
+
+      const toggleNight = (id) => {
+        setSelectedNightIds(prev => prev.includes(id) ? prev.filter(n => n !== id) : [...prev, id]);
+      };
+
+      const handleAddGameRow = () => {
+        setGames(prev => [...prev, { systemName: systems[1]?.name || systems[0]?.name, factions: '' }]);
+      };
+
+      const handleGameChange = (idx, field, val) => {
+        setGames(prev => prev.map((g, i) => i === idx ? { ...g, [field]: val } : g));
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-lg font-bold text-white">📌 Post Availability to "Find a Buddy"</h3>
+              <button onClick={onClose} className="text-slate-400 hover:text-white text-sm">✕</button>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-400 mb-2">1. Available Thursdays</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {clubNights.map(n => {
+                    const checked = selectedNightIds.includes(n.id);
+                    return (
+                      <button key={n.id} type="button" onClick={() => toggleNight(n.id)} className={`p-2.5 rounded-xl border text-left text-xs font-bold transition flex items-center justify-between ${checked ? 'bg-amber-500/20 border-amber-500 text-amber-300' : 'bg-slate-950 border-slate-800 text-slate-400'}`}>
+                        <span>{n.label}</span>
+                        <span>{checked ? '✅' : '⬜'}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <div className="flex justify-between items-center mb-1.5">
+                  <label className="text-xs font-bold uppercase text-slate-400">2. Systems & Factions</label>
+                  <button type="button" onClick={handleAddGameRow} className="text-xs text-amber-400 font-bold hover:underline">+ Add System</button>
+                </div>
+                <div className="space-y-2">
+                  {games.map((g, idx) => (
+                    <div key={idx} className="grid grid-cols-1 sm:grid-cols-2 gap-2 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+                      <select value={g.systemName} onChange={(e) => handleGameChange(idx, 'systemName', e.target.value)} className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                        {systems.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+                      </select>
+                      <input type="text" placeholder="Factions (e.g. Space Marines)" value={g.factions} onChange={(e) => handleGameChange(idx, 'factions', e.target.value)} className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white" />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-400 mb-1">3. Game Vibe</label>
+                <select value={vibe} onChange={(e) => setVibe(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white">
+                  <option>Friendly / Casual</option>
+                  <option>Competitive / Tournament Prep</option>
+                  <option>Narrative / Campaign</option>
+                  <option>Learning / Teaching Rules</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-400 mb-1">4. Extra Notes</label>
+                <input type="text" placeholder="e.g. Happy to play 1000pts or 2000pts" value={notes} onChange={(e) => setNotes(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white" />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
+              <button onClick={onClose} className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-semibold">Cancel</button>
+              <button onClick={() => onSubmit({ availableNightIds: selectedNightIds, games, vibe, notes })} className="px-5 py-2.5 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs shadow-lg">
+                Post to Notice Board
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // --- COMPONENT: CANCEL OR TRANSFER MODAL ---
+    function CancelOrTransferModal({ booking, getUser, currentUserId, onClose, onTransfer, onWipeTable }) {
+      const otherPlayers = booking.players?.filter(p => p.player_id !== currentUserId && !p.is_guest) || [];
+      const [selectedNewHost, setSelectedNewHost] = useState(otherPlayers[0]?.player_id || '');
+
+      return (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-6 space-y-5 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-lg font-bold text-white">⚙️ Cancel or Transfer Table #{booking.table_number}</h3>
+              <button onClick={onClose} className="text-slate-400 hover:text-white text-sm">✕</button>
+            </div>
+            <p className="text-xs text-slate-300">
+              Transferring ownership allows your opponent to keep the table and use "Edit Table" to find a replacement player!
+            </p>
+            <div className="bg-slate-950 border border-slate-800 p-4 rounded-xl space-y-3">
+              <div className="text-xs font-bold text-emerald-400">Option 1: Transfer Table Ownership (Recommended)</div>
+              <select value={selectedNewHost} onChange={(e) => setSelectedNewHost(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white">
+                {otherPlayers.map(p => {
+                  const u = getUser(p.player_id);
+                  return <option key={p.player_id} value={p.player_id}>Promote {u.display_name} to Table Host</option>;
+                })}
+              </select>
+              <button onClick={() => onTransfer(booking.id, selectedNewHost)} className="w-full py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs">
+                🔄 Transfer Ownership
+              </button>
+            </div>
+            <div className="bg-rose-950/20 border border-rose-900/50 p-4 rounded-xl space-y-2">
+              <div className="text-xs font-bold text-rose-300">Option 2: Cancel Entire Table Booking</div>
+              <button onClick={() => onWipeTable(booking.id)} className="w-full py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs">
+                🗑️ Cancel Entire Table
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // --- COMPONENT: USER PROFILE & PRIVACY MODAL ---
+    function UserProfileModal({ user, onClose, onToggleEmailAlerts, onDeleteSelf, onOpenTerms, onSignOut }) {
+      return (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-6 space-y-5 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-lg font-bold text-white">👤 My Profile & Privacy Settings</h3>
+              <button onClick={onClose} className="text-slate-400 hover:text-white text-sm">✕</button>
+            </div>
+            <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-2 text-xs">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Display Name:</span>
+                <span className="font-bold text-white">{user.display_name}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Discord Handle:</span>
+                <span className="font-bold text-indigo-400">{user.discord_handle || 'None'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Club Nights Attended:</span>
+                <span className="font-bold text-amber-400">🏅 {user.attendance || 0} sessions</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Role:</span>
+                <span className="text-emerald-400 font-bold uppercase">{user.role}</span>
+              </div>
+            </div>
+
+            <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex items-center justify-between">
+              <div>
+                <div className="text-xs font-bold text-white">Direct Notifications</div>
+                <div className="text-[11px] text-slate-400">Challenge alerts & table transfers.</div>
+              </div>
+              <button onClick={onToggleEmailAlerts} className={`px-3 py-1.5 rounded-lg text-xs font-bold ${user.email_notifications ? 'bg-emerald-500 text-slate-950' : 'bg-slate-800 text-rose-300'}`}>
+                {user.email_notifications ? '🔔 Active' : '🔕 Muted'}
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-slate-800">
+              <button onClick={onOpenTerms} className="text-xs text-amber-400 underline font-semibold">
+                📜 View T&Cs / GDPR
+              </button>
+              <div className="flex items-center gap-2">
+                <button onClick={onSignOut} className="px-3 py-1.5 rounded-xl bg-slate-800 text-slate-300 text-xs font-bold">
+                  Sign Out
+                </button>
+                <button onClick={() => { if (confirm('Permanently delete your profile and all data?')) onDeleteSelf(); }} className="px-3 py-1.5 rounded-xl bg-rose-950/60 text-rose-300 text-xs font-bold">
+                  🗑️ Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // --- COMPONENT: ONBOARDING & T&CS GATE MODAL ---
+    function OnboardingAuthModal({ session, onClose, onProfileSaved }) {
+      const [authMethod, setAuthMethod] = useState('discord');
+      const [inputEmail, setInputEmail] = useState('');
+      const [inputName, setInputName] = useState(session?.user?.user_metadata?.custom_claims?.global_name || '');
+      const [inputDiscord, setInputDiscord] = useState(session?.user?.user_metadata?.custom_claims?.preferred_username || '');
+      const [termsAccepted, setTermsAccepted] = useState(false);
+      const [emailAlerts, setEmailAlerts] = useState(true);
+      const [submitting, setSubmitting] = useState(false);
+
+      const handleDiscord = async () => {
+        if (!termsAccepted) {
+          alert('Please tick the Terms & Conditions checkbox before connecting with Discord.');
+          return;
+        }
+        await supabase.auth.signInWithOAuth({
+          provider: 'discord',
+          options: { redirectTo: window.location.origin }
+        });
+      };
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!termsAccepted) {
+          alert('You must accept the Terms & Conditions to proceed.');
+          return;
+        }
+
+        setSubmitting(true);
+
+        if (!session) {
+          localStorage.setItem('pending_display_name', inputName);
+          localStorage.setItem('pending_discord_handle', inputDiscord);
+          const { error } = await supabase.auth.signInWithOtp({
+            email: inputEmail,
+            options: { emailRedirectTo: window.location.origin }
+          });
+          setSubmitting(false);
+          if (error) alert(error.message);
+          else alert(`Login link sent to ${inputEmail}! Check your inbox.`);
+          return;
+        }
+
+        const { data, error } = await supabase.from('profiles').upsert([{
+          id: session.user.id,
+          club_id: CLUB_ID,
+          display_name: inputName,
+          discord_handle: inputDiscord.startsWith('@') ? inputDiscord : `@${inputDiscord}`,
+          email_notifications: emailAlerts,
+          role: 'member',
+          accepted_terms_at: new Date().toISOString()
+        }]).select().single();
+
+        setSubmitting(false);
+        if (error) alert(error.message);
+        else onProfileSaved(data);
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700/80 rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl relative">
+            <button onClick={onClose} className="absolute top-5 right-5 text-slate-400 hover:text-white">✕</button>
+            <div className="border-b border-slate-800 pb-3">
+              <h3 className="text-xl font-bold text-white">👋 Welcome to Herd the Nerds!</h3>
+              <p className="text-xs text-slate-400 mt-1">First-Time Member Onboarding & Data Protection Agreement</p>
+            </div>
+            <form onSubmit={handleSubmit} className="space-y-4 text-xs">
+              {!session && (
+                <div>
+                  <label className="block text-xs font-bold uppercase text-slate-400 mb-1.5">1. Choose Sign-In Method</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button type="button" onClick={handleDiscord} className="py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold">
+                      💬 Continue with Discord
+                    </button>
+                    <button type="button" onClick={() => setAuthMethod('email')} className={`py-2.5 px-3 rounded-xl border font-semibold ${authMethod === 'email' ? 'bg-slate-800 border-amber-500 text-amber-400' : 'bg-slate-950 border-slate-800 text-slate-400'}`}>
+                      ✉️ Sign Up with Email
+                    </button>
                   </div>
-                  <div>
-                    <label className="block text-slate-400 font-bold mb-1">Opponent or Non-Member Guest (Optional)</label>
-                    <input type="text" name="guestName" placeholder="e.g. Tony (Guest)" className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white" />
-                  </div>
-                  <button type="submit" className="w-full py-2.5 rounded-xl bg-amber-500 text-slate-950 font-bold">
-                    Claim Table
-                  </button>
-                </form>
+                  {authMethod === 'email' && (
+                    <div className="pt-2">
+                      <label className="block text-slate-300 font-medium mb-1">Email Address</label>
+                      <input required type="email" value={inputEmail} onChange={(e) => setInputEmail(e.target.value)} placeholder="you@example.com" className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white" />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold uppercase text-slate-400 mb-1">Display Name</label>
+                  <input required type="text" value={inputName} onChange={(e) => setInputName(e.target.value)} placeholder="e.g. Roboute Guilliman" className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold uppercase text-slate-400 mb-1">Discord Handle</label>
+                  <input required type="text" value={inputDiscord} onChange={(e) => setInputDiscord(e.target.value)} placeholder="@username" className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white" />
+                </div>
+              </div>
+
+              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 max-h-32 overflow-y-auto custom-scrollbar text-[11px] text-slate-400 space-y-1.5">
+                <div className="font-bold text-amber-400 uppercase">Herd the Nerds — Terms of Use & UK GDPR Notice</div>
+                <p>1. Data We Collect: Display Name, login identifier, and attendance count.</p>
+                <p>2. How Used: Displayed on table cards and the LFG board so members can coordinate games.</p>
+                <p>3. Right of Erasure: You may permanently erase your account at any time in Profile Settings.</p>
+              </div>
+
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input type="checkbox" checked={termsAccepted} onChange={(e) => setTermsAccepted(e.target.checked)} className="mt-0.5 accent-amber-500" />
+                <span className="text-slate-300 text-[11px]">I agree to the Herd the Nerds Terms & Conditions and Data Protection Policy.</span>
+              </label>
+
+              <div className="flex justify-end gap-3 pt-2">
+                <button type="button" onClick={onClose} className="px-4 py-2 text-slate-400 hover:text-white">Cancel</button>
+                <button type="submit" disabled={submitting} className="px-5 py-2.5 rounded-xl bg-emerald-500 text-slate-950 font-bold shadow-lg">
+                  {submitting ? 'Processing...' : '✓ Agree & Create My Profile'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    // --- COMPONENT: STANDALONE TERMS MODAL ---
+    function TermsAndConditionsModal({ onClose }) {
+      return (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-lg font-bold text-amber-400">📜 Herd the Nerds — Terms & Data Protection</h3>
+              <button onClick={onClose} className="text-slate-400 hover:text-white text-sm">✕</button>
+            </div>
+            <div className="space-y-3 text-xs text-slate-300 leading-relaxed">
+              <p><strong>1. Purpose:</strong> This app is operated by the committee to manage table allocations and help members arrange games.</p>
+              <p><strong>2. Data Minimisation:</strong> Only Display Name, Email, Discord handle, and attendance are collected. No financial data.</p>
+              <p><strong>3. Right to Erasure:</strong> Permanent 1-click self-deletion via profile settings.</p>
+            </div>
+            <div className="flex justify-end pt-3 border-t border-slate-800">
+              <button onClick={onClose} className="px-5 py-2 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs">Close</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // --- COMPONENT: COMMITTEE ADMIN PORTAL ---
+    function AdminPortal({ clubNights, selectedNight, setSelectedNightId, currentNightBookings, users, getUser, systems, onToggleAttendance, onMoveDate, onCancelDate, onDeleteUser, onRefresh }) {
+      const [newSysName, setNewSysName] = useState('');
+      const [newSysChannel, setNewSysChannel] = useState('#arrange-a-game-');
+      const [newNightLabel, setNewNightLabel] = useState('');
+      const [newNightTables, setNewNightTables] = useState(12);
+
+      const [editLabel, setEditLabel] = useState(selectedNight?.label || '');
+      const [editNotes, setEditNotes] = useState(selectedNight?.notes || '');
+
+      useEffect(() => {
+        if (selectedNight) {
+          setEditLabel(selectedNight.label);
+          setEditNotes(selectedNight.notes);
+        }
+      }, [selectedNight]);
+
+      const matrixRows = Array.from({ length: selectedNight?.total_tables || 12 }, (_, i) => {
+        const tableNum = i + 1;
+        const booking = currentNightBookings.find(b => b.table_number === tableNum);
+        return { tableNum, booking };
+      });
+
+      const handleAddSystem = async (e) => {
+        e.preventDefault();
+        if (!newSysName.trim()) return;
+        await supabase.from('game_systems').insert([{
+          club_id: CLUB_ID,
+          name: newSysName.trim(),
+          default_players: 2,
+          discord_channel: newSysChannel.trim() || '#general-games'
+        }]);
+        setNewSysName('');
+        onRefresh();
+      };
+
+      const handleAddNight = async (e) => {
+        e.preventDefault();
+        if (!newNightLabel.trim()) return;
+        await supabase.from('club_nights').insert([{
+          club_id: CLUB_ID,
+          event_date: '2026-12-24',
+          label: newNightLabel.trim(),
+          total_tables: Number(newNightTables) || 12,
+          notes: 'Fortnightly Club Night (7:00 PM - 10:30 PM)',
+          status: 'active'
+        }]);
+        setNewNightLabel('');
+        onRefresh();
+      };
+
+      return (
+        <div className="space-y-8">
+          {/* Top Admin Header */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-bold">
+                  Committee Admin View
+                </span>
+                <h2 className="text-xl font-bold text-white">Operations & Member Directory</h2>
+              </div>
+              <p className="text-xs text-slate-400 mt-1">Manage the table matrix, venue date overrides, and registered members.</p>
+            </div>
+            {selectedNight && (
+              <div className="flex items-center gap-2">
+                <label className="text-xs font-bold uppercase text-slate-400">Managing:</label>
+                <select value={selectedNight.id} onChange={(e) => setSelectedNightId(e.target.value)} className="bg-slate-950 border border-amber-500/50 rounded-xl px-3.5 py-2 text-sm text-white font-bold">
+                  {clubNights.map(n => <option key={n.id} value={n.id}>{n.label}</option>)}
+                </select>
+              </div>
+            )}
+          </div>
+
+          {/* VENUE DATE CONTROLS */}
+          {selectedNight && (
+            <div className="bg-slate-900 border border-amber-500/30 rounded-2xl p-5 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-base font-bold text-amber-400">📅 Venue Date Controls for "{selectedNight.label}"</h3>
+                  <p className="text-xs text-slate-400">Moving a date transfers all bookings and alerts affected players.</p>
+                </div>
+                <button onClick={() => { if (confirm(`CANCEL ${selectedNight.label}?`)) onCancelDate(selectedNight.id); }} className="px-4 py-2 rounded-xl bg-rose-950/70 text-rose-300 border border-rose-800 text-xs font-bold">
+                  🚨 Cancel Date
+                </button>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+                <input type="text" value={editLabel} onChange={(e) => setEditLabel(e.target.value)} className="bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white" />
+                <input type="text" value={editNotes} onChange={(e) => setEditNotes(e.target.value)} className="bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white" />
+                <button onClick={() => onMoveDate(selectedNight.id, editLabel, editNotes)} className="py-2 px-4 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs">
+                  🔄 Save / Move Date
+                </button>
               </div>
             </div>
           )}
+
+          {/* 12-TABLE ATTENDANCE MATRIX */}
+          {selectedNight && (
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+              <h3 className="text-base font-bold text-white">📋 Game Night Table & Attendance Matrix</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-400 uppercase tracking-wider text-[11px]">
+                      <th className="py-3 px-3">Table #</th>
+                      <th className="py-3 px-3">Status</th>
+                      <th className="py-3 px-3">Game System</th>
+                      <th className="py-3 px-3">Players & Attendance Check-In</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/70">
+                    {matrixRows.map(({ tableNum, booking }) => {
+                      if (!booking) {
+                        return (
+                          <tr key={tableNum} className="bg-slate-950/30 text-slate-500">
+                            <td className="py-3 px-3 font-mono font-bold">Table #{tableNum}</td>
+                            <td className="py-3 px-3"><span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800">Unclaimed</span></td>
+                            <td className="py-3 px-3">—</td>
+                            <td className="py-3 px-3 italic">Available for booking</td>
+                          </tr>
+                        );
+                      }
+                      return (
+                        <tr key={tableNum} className="hover:bg-slate-950/40">
+                          <td className="py-3 px-3 font-mono font-bold text-amber-400 align-top">Table #{tableNum}</td>
+                          <td className="py-3 px-3 align-top">
+                            <span className="px-2 py-0.5 rounded font-bold bg-emerald-500/20 text-emerald-300">
+                              {booking.players?.length || 0}/{booking.max_players} Seated
+                            </span>
+                          </td>
+                          <td className="py-3 px-3 font-bold text-white align-top">
+                            <div>{booking.game_system?.name}</div>
+                            {booking.game_notes && <div className="text-[11px] font-normal text-slate-400">{booking.game_notes}</div>}
+                          </td>
+                          <td className="py-3 px-3 align-top space-y-1.5">
+                            {booking.players?.map(p => (
+                              <div key={p.id} className="flex items-center justify-between bg-slate-950 border border-slate-800 px-3 py-1.5 rounded-lg">
+                                <span className="font-bold text-white mr-2">{p.guest_name}</span>
+                                {!p.is_guest && (
+                                  <label className="flex items-center gap-1.5 cursor-pointer">
+                                    <input type="checkbox" checked={p.attended} onChange={() => onToggleAttendance(booking.id, p.player_id)} className="rounded accent-amber-500" />
+                                    <span className={p.attended ? 'text-amber-400 font-bold' : 'text-slate-400'}>Attended (+1)</span>
+                                  </label>
+                                )}
+                              </div>
+                            ))}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* MASTER USER DIRECTORY */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+            <h3 className="text-base font-bold text-white">👥 Master Member Directory ({users.length} Profiles)</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-slate-800 text-slate-400 uppercase text-[11px]">
+                    <th className="py-2.5 px-3">Member Name</th>
+                    <th className="py-2.5 px-3">Discord Handle</th>
+                    <th className="py-2.5 px-3">Role</th>
+                    <th className="py-2.5 px-3">Attendances</th>
+                    <th className="py-2.5 px-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/70">
+                  {users.map(u => (
+                    <tr key={u.id}>
+                      <td className="py-2.5 px-3 font-bold text-white">{u.display_name}</td>
+                      <td className="py-2.5 px-3 text-indigo-400">{u.discord_handle || '—'}</td>
+                      <td className="py-2.5 px-3 uppercase text-[10px] font-bold text-amber-400">{u.role}</td>
+                      <td className="py-2.5 px-3 font-bold text-amber-400">🏅 {u.attendance || 0}</td>
+                      <td className="py-2.5 px-3 text-right">
+                        <button onClick={() => { if (confirm(`Delete profile for ${u.display_name}?`)) onDeleteUser(u.id); }} className="px-2.5 py-1 rounded bg-rose-950/60 text-rose-300">
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* SYSTEMS & FUTURE DATES FORMS */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <form onSubmit={handleAddSystem} className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
+              <h4 className="text-sm font-bold text-white">➕ Add Game System & Discord Route</h4>
+              <div className="grid grid-cols-2 gap-2">
+                <input type="text" placeholder="System Name" value={newSysName} onChange={(e) => setNewSysName(e.target.value)} className="bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white" />
+                <input type="text" placeholder="#channel-name" value={newSysChannel} onChange={(e) => setNewSysChannel(e.target.value)} className="bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-indigo-300 font-mono" />
+              </div>
+              <button type="submit" className="w-full py-2 rounded-xl bg-slate-800 hover:bg-amber-500 hover:text-slate-950 text-xs font-bold">Add System</button>
+            </form>
+
+            <form onSubmit={handleAddNight} className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-3">
+              <h4 className="text-sm font-bold text-white">📅 Unlock / Add Club Night Date</h4>
+              <div className="grid grid-cols-3 gap-2">
+                <input type="text" placeholder="e.g. Thu 7 Jan 2027" value={newNightLabel} onChange={(e) => setNewNightLabel(e.target.value)} className="col-span-2 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white" />
+                <input type="number" value={newNightTables} onChange={(e) => setNewNightTables(e.target.value)} className="bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white" />
+              </div>
+              <button type="submit" className="w-full py-2 rounded-xl bg-slate-800 hover:bg-amber-500 hover:text-slate-950 text-xs font-bold">Add Date</button>
+            </form>
+          </div>
         </div>
       );
     }
